@@ -16,7 +16,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.logger import init_logger
 from vllm.utils.hashing import safe_hash
-from vllm.v1.attention.backends.mla.common import MLACommonMetadata
+# from vllm.v1.attention.backends.mla.common import MLACommonMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -118,6 +118,7 @@ class ExampleConnector(KVConnectorBase_V1):
             The number of elements in kv_caches and layer_names should be
             the same.
         """
+        return 
         attn_metadata = forward_context.attn_metadata
 
         def inject_kv_into_layer(
@@ -224,7 +225,7 @@ class ExampleConnector(KVConnectorBase_V1):
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
         """
-
+        return 
         def extract_kv_from_layer(
             layer: torch.Tensor,
             slot_mapping: torch.Tensor,
@@ -279,6 +280,7 @@ class ExampleConnector(KVConnectorBase_V1):
         # NOTE: in current v1 scheduler, the num_computed_tokens is aligned
         # with the block granularity. And it expects the returned blocks and
         # num_computed_tokens to also be aligned with the block granularity.
+        return len(request.prompt_token_ids) - 1, False
         if not self._found_match_for_request(request):
             return 0, False
 

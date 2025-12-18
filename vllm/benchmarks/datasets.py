@@ -11,7 +11,7 @@ generation. Supported dataset types include:
   - HuggingFace
   - VisionArena
 """
-
+from typing import List
 import argparse
 import ast
 import base64
@@ -464,6 +464,136 @@ class RandomDataset(BenchmarkDataset):
         # Do not use random.seed() or np.random.seed() elsewhere in this class.
         # This ensures that the RNG is isolated from global RNG state.
         self._rng = np.random.default_rng(self.random_seed)
+    def _redistribute_with_max_limit(self, original_list: list, max_allowed_length: float):
+        """
+        将一个列表重新分布，使其形状类似于Moonlight曲线，同时保持总和不变，
+        并确保没有任何一个元素超过指定的最大长度限制。
+        参数:
+        original_list (list): 原始列表，其中所有元素都相同。
+        max_allowed_length (float): 生成的列表中任何单个元素都不能超过的最大值。
+        返回:
+        list: 一个新的列表，满足所有约束条件。
+        """
+        # 步骤1: 获取初始信息和可行性检查
+        N = len(original_list)
+        if N == 0:
+            return []
+        total_sum = sum(original_list)
+        if total_sum > N * max_allowed_length:
+            raise ValueError(
+                f"任务不可能完成：目标总和 ({total_sum}) 大于 "
+                f"列表长度 ({N}) 与最大限制 ({max_allowed_length}) 的乘积 ({N * max_allowed_length})。"
+            )
+        # 步骤2: 模拟生成符合Moonlight分布的“模板”列表 (与之前相同)
+        max_val = 65000.0
+        cutoff_percentage = 0.1
+        power = 2.5
+        
+        unscaled_new_list = []
+        cutoff_count = int(N * cutoff_percentage)
+        for _ in range(cutoff_count):
+            unscaled_new_list.append(max_val)
+        
+        remaining_count = N - cutoff_count
+        for _ in range(remaining_count):
+            value = max_val * (random.random() ** power)
+            unscaled_new_list.append(value)
+        # 步骤3: 使用二分查找找到最佳缩放因子
+        # 定义一个函数，根据给定的缩放因子计算应用限制后的总和
+        def get_sum_with_scaling(s):
+            return sum(min(x * s, max_allowed_length) for x in unscaled_new_list)
+        # 二分查找的边界
+        low = 0.0
+        # 一个足够大的上界，例如使得平均值达到最大限制
+        high = (N * max_allowed_length) / sum(unscaled_new_list) * 2 
+        
+        # 迭代寻找最佳缩放因子
+        for _ in range(100): # 100次迭代足以达到很高的精度
+            mid = (low + high) / 2
+            current_sum = get_sum_with_scaling(mid)
+            if current_sum < total_sum:
+                low = mid
+            else:
+                high = mid
+        
+        best_scaling_factor = (low + high) / 2
+        # 步骤4: 使用找到的最佳缩放因子生成最终列表
+        final_list = [min(x * best_scaling_factor, max_allowed_length) for x in unscaled_new_list]
+        
+        # 由于计算误差，总和可能略有偏差，进行微调
+        # 将误差平均分配到每个元素上，这是最简单的修正方法
+        current_final_sum = sum(final_list)
+        correction = (total_sum - current_final_sum) / N
+        final_list = [x + correction for x in final_list]
+        # 打乱列表顺序
+        random.shuffle(final_list)
+        return final_list
+    def _reshape_list_by_chunks(
+        self,
+        data_list: List[float], 
+        max_value: float, 
+        chunk_size: int = 96
+    ) -> List[float]:
+        """
+        重塑列表的值，以指定的块大小（默认为96）为单位进行操作。
+        在每个块中，随机选择一个元素，尝试将其值提升到 max_value。
+        提升所需的差额由块内其他元素按其自身值的比例均匀分摊。
+        Args:
+            data_list (List[float]): 包含数值的输入列表，其长度应为 chunk_size 的整数倍。
+            max_value (float): 每个块中被选中元素的目标最大值。
+            chunk_size (int): 处理单元的块大小，默认为 96。
+        Returns:
+            List[float]: 经过重塑后得到的新列表。
+        Raises:
+            ValueError: 如果输入列表的长度不是 chunk_size 的整数倍。
+        """
+        # 1. 输入验证
+        if len(data_list) % chunk_size != 0:
+            raise ValueError(f"列表长度 {len(data_list)} 必须是 chunk_size ({chunk_size}) 的整数倍。")
+        # 创建一个副本进行操作，避免修改原始列表
+        result_list = data_list.copy()
+        # 2. 按块遍历列表
+        for i in range(0, len(result_list), chunk_size):
+            start_index = i
+            end_index = i + chunk_size
+            # 3. 在当前块中随机挑选一个“幸运儿”
+            # chosen_local_index 是块内的相对索引 (0-95)
+            chosen_local_index = random.randint(0, chunk_size - 1)
+            # chosen_global_index 是在整个 result_list 中的绝对索引
+            chosen_global_index = start_index + chosen_local_index
+            
+            chosen_value = result_list[chosen_global_index]
+            # 如果“幸运儿”的值已经达到或超过最大值，则无需操作，跳到下一个块
+            if chosen_value >= max_value:
+                continue
+            # 4. 计算需要填补的差额（“缺口”）
+            deficit = max_value - chosen_value
+            # 5. 确定“贡献者”及其“贡献资金池”
+            donor_indices = []
+            donor_pool_total = 0.0
+            for j in range(chunk_size):
+                # 排除“幸运儿”自己
+                if j != chosen_local_index:
+                    global_idx = start_index + j
+                    donor_indices.append(global_idx)
+                    donor_pool_total += result_list[global_idx]
+            
+            # 6. 计算实际能凑集到的总金额
+            # 如果资金池不够，就倾其所有；如果够，就只凑需要的差额
+            total_to_contribute = min(deficit, donor_pool_total)
+            
+            # 7. 根据比例进行贡献和扣减
+            if donor_pool_total > 0: # 避免除以零
+                for donor_idx in donor_indices:
+                    # 计算每个贡献者应付出的份额（按其在资金池中的占比）
+                    contribution_ratio = result_list[donor_idx] / donor_pool_total
+                    # 从该贡献者身上扣除相应金额
+                    deduction = total_to_contribute * contribution_ratio
+                    result_list[donor_idx] -= deduction
+            # 8. 将凑集到的金额增加给“幸运儿”
+            result_list[chosen_global_index] += total_to_contribute
+            
+        return result_list
 
     def sample(
         self,
@@ -497,7 +627,7 @@ class RandomDataset(BenchmarkDataset):
         input_lens, output_lens, offsets = self.get_sampling_params(
             num_requests, range_ratio, input_len, output_len, tokenizer
         )
-
+        # input_lens = self._reshape_list_by_chunks(input_lens, 150000, 96)
         vocab_size = tokenizer.vocab_size
         prohibited_tokens = tokenizer.all_special_ids
         all_tokens = np.arange(vocab_size)
