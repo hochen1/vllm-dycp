@@ -182,21 +182,21 @@ class CrossDPKVCacheCoordinatorNoPrefixCache:
                 assert len(new_computed_blocks[i]) == 0
 
     def allocate_new_blocks(
-        self, dcp_rank: list[int], request_id: str, num_tokens: int, num_encoder_tokens: int = 0
+        self, dcp_ranks: list[int], request_id: str, num_tokens: int, num_encoder_tokens: int = 0
     ) -> list[tuple[list[KVCacheBlock], ...]]:
         
         blocks = []
-        results = self._distribute_tokens_to_dcp_ranks(len(dcp_rank), num_tokens)
+        results = self._distribute_tokens_to_dcp_ranks(len(dcp_ranks), num_tokens)
 
-        for idx, rank_managers in enumerate(self.corss_dp_single_type_managers):
-           blocks.append(tuple(
-            manager.allocate_new_blocks(
-                request_id,
-                results[idx],
+        for idx, rank in enumerate(dcp_ranks):
+            blocks.append(
+                tuple(
+                    manager.allocate_new_blocks(
+                        request_id,
+                        results[idx]
+                    ) for manager in self.corss_dp_single_type_managers[rank]
+                )
             )
-            for manager in rank_managers
-        ))
-
         return blocks
 
     def cache_blocks(self, request: Request, num_tokens: int) -> None:
@@ -241,8 +241,7 @@ class CrossDPKVCacheCoordinatorNoPrefixCache:
         """
         blocks_by_rank = []
         
-        for rank in range(len(self.corss_dp_single_type_managers)):
-            rank_managers = self.corss_dp_single_type_managers[rank]
+        for rank_managers in self.corss_dp_single_type_managers:
             rank_blocks = []
             
             for manager in rank_managers:
@@ -360,7 +359,10 @@ class CrossDPKVCacheManager:
         delay_cache_blocks: bool = False,
         num_encoder_tokens: int = 0,
     ) -> list[KVCacheBlocks] | None:
-        
+        """
+            return:
+                len(list[KVCacheBlocks]) = len(dcp_ranks)
+        """
         if len(dcp_ranks) > self.dcp_size:
             raise ValueError("dcp_ranks can not greater than dcp_size")
         
@@ -376,7 +378,7 @@ class CrossDPKVCacheManager:
             new_computed_block_list = self.empty_kv_cache_blocks.blocks
         
         self.coordinator.remove_skipped_blocks(
-            request.request_id, request.num_computed_tokens
+            dcp_ranks, request.request_id, request.num_computed_tokens
         )
 
         num_computed_tokens = request.num_computed_tokens + num_new_computed_tokens
@@ -385,6 +387,8 @@ class CrossDPKVCacheManager:
             self.max_model_len,
         )
 
+        # Now the get_num_blocks_to_allocate return a int, it seems wrong, 
+        # it should return a list[int], len(list[int]) = len(dcp_rank)
         num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
             dcp_ranks=dcp_ranks,
             request_id=request.request_id,
@@ -419,6 +423,8 @@ class CrossDPKVCacheManager:
             num_encoder_tokens=num_encoder_tokens,
         )
 
+        assert len(new_blocks) == len(dcp_ranks), "the size of new_blocks should be equal to size of dcp_ranks"
+
         if not self.enable_caching or delay_cache_blocks:
             # This condition is always true in this version
             return self.create_kv_cache_blocks(new_blocks)
@@ -427,18 +433,18 @@ class CrossDPKVCacheManager:
     def free(self, request: Request) -> None:
         self.coordinator.free(request.request_id)
 
-    def get_blocks(self, request_id: str) -> list[KVCacheBlocks]:
+    def get_blocks(self, request: Request) -> list[KVCacheBlocks]:
         """Get the blocks of a request."""
-        blocks = self.create_kv_cache_blocks(self.coordinator.get_blocks(request_id))
-        assert len(blocks) == self.dcp_size
+        blocks_all = self.coordinator.get_blocks(request.request_id)   # List[Any]
+        wanted = [blocks_all[i] for i in request.dcp_ranks if 0 <= i < len(blocks_all)]
+        blocks = self.create_kv_cache_blocks(wanted)
         return blocks
     
     
-    def get_block_ids(self, request_id: str) -> list[tuple[list[int], ...]]:
+    def get_block_ids(self, request: Request) -> list[tuple[list[int], ...]]:
         """Get the block ids of a request."""
-        blocks = self.get_blocks(request_id)
+        blocks = self.get_blocks(request)
         block_ids = [block.get_block_ids() for block in blocks]
-        assert len(block_ids) == self.dcp_size
         return block_ids
 
     def create_kv_cache_blocks(
@@ -446,5 +452,5 @@ class CrossDPKVCacheManager:
     ) -> list[KVCacheBlocks]:
         # Only create new KVCacheBlocks for non-empty blocks
         kv_cache_blocks = [KVCacheBlocks(blocks) if any(blocks) else self.empty_kv_cache_blocks for blocks in corss_blocks]
-        assert len(kv_cache_blocks) == self.dcp_size
+        # the len(kv_cache_blocks) == len(dcp_ranks) of the request
         return kv_cache_blocks

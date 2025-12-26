@@ -1853,6 +1853,8 @@ class Scheduler(SchedulerInterface):
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
 
+        print("0" * 50, flush=True)
+
         scheduled_new_reqs: list[list[Request]] = [[] for _ in range(self.dcp_world_size)]
         scheduled_resumed_reqs: list[list[Request]] = [[] for _ in range(self.dcp_world_size)]
         scheduled_running_reqs: list[list[Request]] = [[] for _ in range(self.dcp_world_size)]
@@ -2028,6 +2030,7 @@ class Scheduler(SchedulerInterface):
             assert len(request.dcp_ranks) == len(new_blocks)
             for i, rank in enumerate(request.dcp_ranks):
                 req_to_new_blocks[rank][request.request_id] = new_blocks[i]
+                print(new_blocks[i], "allocated for request", request.request_id, "on rank", rank)
             
             """
             TODO(AoChen): num_scheduled_tokens should be a list of ints for each DCP rank or something else.
@@ -2087,20 +2090,23 @@ class Scheduler(SchedulerInterface):
         skipped_waiting_requests = create_request_queue(self.policy)
 
         # Next, schedule the WAITING requests.
-        if not preempted_reqs:
+        if not any(preempted_reqs):
             while self.waiting and token_budget > 0:
+                print("0" * 50, flush=True)
                 if len(self.running) == self.max_num_running_reqs * self.dcp_world_size:
                     break
-
+                print("0" * 50, flush=True)
                 request = self.waiting.peek_request()
-                if request.dcp_ranks is None:
+                if len(request.dcp_ranks) == 0:
                     if request.num_tokens > 32 * 1024:
                         request.dcp_ranks = [idx for idx in range(self.dcp_world_size)]
                     else:
                         request.dcp_ranks = [0]
+                        print("scheduling request", request.request_id, "to rank 0", flush=True)
             
                 # KVTransfer: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                    print("Request", request.request_id, "is in WAITING_FOR_REMOTE_KVS state.", flush=True)
                     is_ready = self._update_waiting_for_remote_kv(request)
                     if is_ready:
                         request.status = RequestStatus.WAITING
@@ -2138,7 +2144,7 @@ class Scheduler(SchedulerInterface):
                 #     self.waiting.pop_request()
                 #     skipped_waiting_requests.prepend_request(request)
                 #     continue
-
+                print("Trying to schedule waiting request", request.request_id, flush=True)
                 num_external_computed_tokens = 0
                 load_kv_async = False
 
@@ -2272,10 +2278,15 @@ class Scheduler(SchedulerInterface):
                 TODO(AoChen): update_state_after_alloc(PD disagg) is not implemented yet.
                 """
                 if self.connector is not None:
+                    """
+                        In the example connector, new_computed_blocks + new_blocks is not used,
+                        So, temparily ignore it.
+                    """
                     self.connector.update_state_after_alloc(
-                        request,
-                        new_computed_blocks + new_blocks,
-                        num_external_computed_tokens,
+                        request=request,
+                        # new_computed_blocks + new_blocks,
+                        blocks=None,
+                        num_external_tokens=num_external_computed_tokens,
                     )
 
                 # Request was already popped from self.waiting
@@ -2308,9 +2319,16 @@ class Scheduler(SchedulerInterface):
 
                 # if self.lora_config and request.lora_request:
                 #     scheduled_loras.add(request.lora_request.lora_int_id)
-                req_to_new_blocks[request.request_id] = (
-                    self.kv_cache_manager.get_blocks(request.request_id)
-                )
+                print("Scheduling request", request.request_id, "with num_new_tokens =", num_new_tokens, flush=True)
+
+                blocks = self.kv_cache_manager.get_blocks(request)
+                for idx, rank in enumerate(request.dcp_ranks):
+                    req_to_new_blocks[rank][request.request_id] = (
+                        blocks[idx]
+                    )
+                # req_to_new_blocks[request.request_id] = (
+                #     self.kv_cache_manager.get_blocks(request)
+                # )
 
                 """
                 TODO(AoChen): num_scheduled_tokens should be a list of ints for each DCP rank or something else.
@@ -2370,17 +2388,19 @@ class Scheduler(SchedulerInterface):
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
         num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
-        with record_function_or_nullcontext("schedule: get_num_common_prefix_blocks"):
-            if self.running:
-                any_request = self.running[0]
-                num_common_prefix_blocks = (
-                    self.kv_cache_manager.get_num_common_prefix_blocks(
-                        any_request.request_id
-                    )
-                )
+        # with record_function_or_nullcontext("schedule: get_num_common_prefix_blocks"):
+        #     if self.running:
+        #         any_request = self.running[0]
+        #         num_common_prefix_blocks = (
+        #             self.kv_cache_manager.get_num_common_prefix_blocks(
+        #                 any_request.request_id
+        #             )
+        #         )
 
         assert sum(len(sub) for sub in scheduled_resumed_reqs) == 0, "Scheduled resumed requests are not supported now."
         
+        print("1" * 50, flush=True)
+
         # Construct the scheduler output.
         if self.use_v2_model_runner:
             # scheduled_new_reqs = scheduled_new_reqs + scheduled_resumed_reqs
@@ -2405,12 +2425,12 @@ class Scheduler(SchedulerInterface):
             total_new_reqs_data = [
                 [
                     NewRequestData.from_request(
-                        req, req_to_new_blocks[req.request_id].get_block_ids()
+                        req, req_to_new_blocks[idx][req.request_id].get_block_ids()
                     )
                     for req in scheduled_new_reqs[idx]
                 ] for idx in range(self.dcp_world_size)
             ]
-
+        
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
             # cached_reqs_data = self._make_cached_request_data(
             #     scheduled_running_reqs,
