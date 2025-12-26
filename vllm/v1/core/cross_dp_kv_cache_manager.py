@@ -36,7 +36,7 @@ class DPBlockPool(BlockPool):
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         self.dcp_rank = dcp_rank
-        super.__init__(
+        super().__init__(
             num_gpu_blocks,
             enable_caching,
             hash_block_size,
@@ -47,7 +47,7 @@ class DPBlockPool(BlockPool):
     def get_dcp_rank_id(self):
         return self.dcp_rank
 
-class CorssDPKVCacheCoordinatorNoPrefixCache:
+class CrossDPKVCacheCoordinatorNoPrefixCache:
     def __init__(
         self,
         kv_cache_config: KVCacheConfig,
@@ -268,7 +268,7 @@ class CorssDPKVCacheCoordinatorNoPrefixCache:
         )
         return blocks, 0
 
-class CorssDPKVCacheManager:
+class CrossDPKVCacheManager:
     def __init__(
         self,
         kv_cache_config: KVCacheConfig,
@@ -296,7 +296,7 @@ class CorssDPKVCacheManager:
         # potential configs we could expose in the future.
         self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
 
-        self.coordinator = CorssDPKVCacheCoordinatorNoPrefixCache(
+        self.coordinator = CrossDPKVCacheCoordinatorNoPrefixCache(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
             use_eagle=self.use_eagle,
@@ -307,7 +307,9 @@ class CorssDPKVCacheManager:
             hash_block_size=hash_block_size,
             metrics_collector=self.metrics_collector,
         )
-
+        
+        self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
+        
         # A corss dp manager manages the dp number block pool
         self.block_pools = self.coordinator.block_pools
         assert len(self.coordinator.block_pools) == dcp_world_size

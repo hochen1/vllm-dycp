@@ -2348,7 +2348,7 @@ class Scheduler(SchedulerInterface):
         """
         TODO(AoChen): total_num_scheduled_tokens scheduling constraints are not implemented yet.
         """
-        total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
+        total_num_scheduled_tokens = sum([sum(scheduled_tokens.values()) for scheduled_tokens in num_scheduled_tokens])
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
 
         assert token_budget >= 0
@@ -2379,20 +2379,21 @@ class Scheduler(SchedulerInterface):
                     )
                 )
 
-        assert len(scheduled_resumed_reqs) == 0, "Scheduled resumed requests are not supported now."
+        assert sum(len(sub) for sub in scheduled_resumed_reqs) == 0, "Scheduled resumed requests are not supported now."
         
         # Construct the scheduler output.
         if self.use_v2_model_runner:
-            scheduled_new_reqs = scheduled_new_reqs + scheduled_resumed_reqs
-            scheduled_resumed_reqs = []
-            new_reqs_data = [
-                NewRequestData.from_request(
-                    req,
-                    req_to_new_blocks[req.request_id].get_block_ids(),
-                    req._all_token_ids,
-                )
-                for req in scheduled_new_reqs
-            ]
+            # scheduled_new_reqs = scheduled_new_reqs + scheduled_resumed_reqs
+            # scheduled_resumed_reqs = []
+            # new_reqs_data = [
+            #     NewRequestData.from_request(
+            #         req,
+            #         req_to_new_blocks[req.request_id].get_block_ids(),
+            #         req._all_token_ids,
+            #     )
+            #     for req in scheduled_new_reqs
+            # ]
+            pass
         else:
             # new_reqs_data = [
             #     NewRequestData.from_request(
@@ -2419,20 +2420,19 @@ class Scheduler(SchedulerInterface):
             #     req_to_new_blocks,
             # )
             total_cached_reqs_data = [
-                [
                     self._make_cached_request_data(
                         scheduled_running_reqs[idx],
                         scheduled_resumed_reqs[idx],
                         num_scheduled_tokens[idx], # num_scheduled_tokens should be refined num_scheduled_tokens[idx]
                         scheduled_spec_decode_tokens,
                         req_to_new_blocks[idx], # req_to_new_blocks should be refined req_to_new_blocks[idx]
-                    )
-                ] for idx in range(self.dcp_world_size)
+                    ) for idx in range(self.dcp_world_size)
             ]
 
         # Record the request ids that were scheduled in this step.
         self.prev_step_scheduled_req_ids.clear()
-        self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
+        for scheduled_tokens in num_scheduled_tokens:
+            self.prev_step_scheduled_req_ids.update(scheduled_tokens.keys())
 
         # scheduler_output = SchedulerOutput(
         #     scheduled_new_reqs=new_reqs_data,
