@@ -136,7 +136,9 @@ class Request:
             self.block_hashes = self.get_hash_new_full_blocks()
 
         self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
-
+        
+        self.dcp_ranks: list[int] = []
+        
     @classmethod
     def from_engine_core_request(
         cls,
