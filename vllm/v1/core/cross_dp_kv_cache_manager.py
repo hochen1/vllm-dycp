@@ -103,7 +103,7 @@ class CrossDPKVCacheCoordinatorNoPrefixCache:
 
         results = []
         for idx in range(world_size):
-            local_blocks = quota + (1 if remainder < idx else 0)
+            local_blocks = quota + (1 if idx < remainder else 0)
             if remainder - 1 == idx:
                 local_tokens = (local_blocks - 1) * self.block_size + remain_tokens
             else:
@@ -187,7 +187,7 @@ class CrossDPKVCacheCoordinatorNoPrefixCache:
         
         blocks = []
         results = self._distribute_tokens_to_dcp_ranks(len(dcp_ranks), num_tokens)
-
+        print(f"results={results}", flush=True)
         for idx, rank in enumerate(dcp_ranks):
             blocks.append(
                 tuple(
@@ -320,13 +320,13 @@ class CrossDPKVCacheManager:
         )
     
     @property
-    def usage(self, dcp_rank) -> float:
+    def usage(self) -> float:
         """Get the KV cache usage of specfic DP ranks
 
         Returns:
             The KV cache usage of all DP ranks
         """
-        return self.block_pools[dcp_rank].get_usage()
+        return self.block_pools[0].get_usage()
 
 
     def make_prefix_cache_stats(self) -> PrefixCacheStats | None:
@@ -422,7 +422,7 @@ class CrossDPKVCacheManager:
             num_tokens=num_tokens_need_slot,
             num_encoder_tokens=num_encoder_tokens,
         )
-
+        
         assert len(new_blocks) == len(dcp_ranks), "the size of new_blocks should be equal to size of dcp_ranks"
 
         if not self.enable_caching or delay_cache_blocks:
@@ -454,3 +454,21 @@ class CrossDPKVCacheManager:
         kv_cache_blocks = [KVCacheBlocks(blocks) if any(blocks) else self.empty_kv_cache_blocks for blocks in corss_blocks]
         # the len(kv_cache_blocks) == len(dcp_ranks) of the request
         return kv_cache_blocks
+    
+    def take_events(self):
+        """
+         Temparily ignore this
+        """
+        return []
+    
+    def make_prefix_cache_stats(self) -> PrefixCacheStats | None:
+        """Get (and reset) the prefix cache stats.
+
+        Returns:
+            The current prefix caching stats, or None if logging is disabled.
+        """
+        if not self.log_stats:
+            return None
+        stats = self.prefix_cache_stats
+        self.prefix_cache_stats = PrefixCacheStats()
+        return stats

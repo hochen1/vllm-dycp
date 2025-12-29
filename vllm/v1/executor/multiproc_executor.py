@@ -275,6 +275,31 @@ class MultiprocExecutor(Executor):
             kv_output_aggregator=self.kv_output_aggregator,
         )
 
+    def execute_model_v1(  # type: ignore[override]
+        self, scheduler_outputs: list[SchedulerOutput], non_block: bool = False
+    ) -> Future[list[None]]:
+        return self.collective_rpc(
+            "execute_model",
+            args=(scheduler_outputs,),
+            # unique_reply_rank=self.output_rank,
+            non_block=non_block,
+            timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
+            kv_output_aggregator=self.kv_output_aggregator,
+        )
+
+    def sample_tokens_v1(  # type: ignore[override]
+        self, grammar_output: GrammarOutput | None, non_block: bool = False
+    ) -> list[ModelRunnerOutput] | Future[list[ModelRunnerOutput]]:
+
+        return self.collective_rpc(
+            "sample_tokens",
+            args=(grammar_output,),
+            # unique_reply_rank=self.output_rank,
+            non_block=non_block,
+            timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
+            kv_output_aggregator=self.kv_output_aggregator,
+        )
+
     def execute_dummy_batch(self) -> None:
         self.collective_rpc("execute_dummy_batch", unique_reply_rank=self.output_rank)
 
@@ -307,9 +332,14 @@ class MultiprocExecutor(Executor):
 
         if kv_output_aggregator is not None:
             output_rank = None
-            aggregate: Callable[[Any], Any] = partial(
-                kv_output_aggregator.aggregate, output_rank=unique_reply_rank or 0
-            )
+            if method in ("execute_model", "sample_tokens"):
+                aggregate: Callable[[Any], Any] = partial(
+                    kv_output_aggregator.aggregate_v1, output_rank=unique_reply_rank or 0
+                )
+            else:
+                aggregate: Callable[[Any], Any] = partial(
+                    kv_output_aggregator.aggregate, output_rank=unique_reply_rank or 0
+                )
         else:
             output_rank = unique_reply_rank
             aggregate = lambda x: x

@@ -108,6 +108,7 @@ from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     reorder_batch_to_split_decodes_and_prefills,
     split_attn_metadata,
+    reorder_batch_to_split_cp_and_normal,
 )
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (
@@ -740,6 +741,11 @@ class GPUModelRunner(
                 self.input_batch,
                 scheduler_output,
                 decode_threshold=self.reorder_batch_threshold,
+            )
+        if scheduler_output.num_cp_request > 0:
+            reorder_batch_to_split_cp_and_normal(
+                self.input_batch,
+                scheduler_output
             )
 
     # Note: used for model runner override.

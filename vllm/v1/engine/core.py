@@ -199,9 +199,11 @@ class EngineCore:
                 scheduler_block_size, caching_hash_fn
             )
 
-        self.step_fn = (
-            self.step if self.batch_queue is None else self.step_with_batch_queue
-        )
+        # self.step_fn = (
+        #     self.step if self.batch_queue is None else self.step_with_batch_queue
+        # )
+        self.step_fn = self.step_v1
+
         self.async_scheduling = vllm_config.scheduler_config.async_scheduling
 
         self.aborts_queue = queue.Queue[list[str]]()
@@ -308,7 +310,7 @@ class EngineCore:
         self.scheduler.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
 
     @contextmanager
-    def log_error_detail(self, scheduler_output: SchedulerOutput):
+    def log_error_detail(self, scheduler_outputs: SchedulerOutput | list[SchedulerOutput]):
         """Execute the model and log detailed info on failure."""
         try:
             yield
@@ -318,9 +320,18 @@ class EngineCore:
             # error from execute_model itself.
 
             # NOTE: This method is exception-free
-            dump_engine_exception(
-                self.vllm_config, scheduler_output, self.scheduler.make_stats()
-            )
+            if isinstance(scheduler_outputs,list):
+                for sched_out in scheduler_outputs:
+                    if sched_out is False:
+                        continue
+
+                    dump_engine_exception(
+                        self.vllm_config, sched_out, self.scheduler.make_stats()
+                    )
+            else:
+                dump_engine_exception(
+                        self.vllm_config, scheduler_outputs, self.scheduler.make_stats()
+                    )
             raise err
 
     def _log_err_callback(self, scheduler_output: SchedulerOutput):
@@ -360,6 +371,63 @@ class EngineCore:
         )
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
+    
+    def step_v1(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
+        """Schedule, execute, and make output.
+
+        Returns tuple of outputs and a flag indicating whether the model
+        was executed.
+        """
+
+        # Check for any requests remaining in the scheduler - unfinished,
+        # or finished and not yet removed from the batch.
+        if not self.scheduler.has_requests():
+            return {}, False
+        scheduler_outputs = self.scheduler.schedule_v1()
+        """
+         scheduler_outputs: [None, out, None, out]
+        """
+
+        """
+            [false, None, false, model_runner_output]
+            false: dummy run;
+            None: total_scheduled_num > 0
+            model_runner_output: total_scheduled_num = 0
+        """
+        future = self.model_executor.execute_model_v1(scheduler_outputs, non_block=True)
+        
+        # print("finished Model outputs", execute_outputs, flush=True)
+        with self.log_error_detail(scheduler_outputs):
+            execute_outputs = future.result()
+            
+            if None in execute_outputs:
+                if isinstance(scheduler_outputs, list):
+                    # grammar_output = None
+                    grammar_output = [None if mo is None else True for mo in execute_outputs]
+                sample_outputs = self.model_executor.sample_tokens_v1(grammar_output)
+                """
+                    [false, model_runner_output, false, false]
+                """
+
+        model_outputs = []
+        for exec_out, sample_out in zip(execute_outputs, sample_outputs):
+            # model_outputs.append()
+            if exec_out == False and sample_out == False:
+                model_outputs.append(None)
+            elif exec_out == None and isinstance(sample_out, ModelRunnerOutput):
+                model_outputs.append(sample_out)
+            elif isinstance(exec_out, ModelRunnerOutput) and sample_out == False:
+                model_outputs.append(exec_out)
+
+        assert len(model_outputs) == len(scheduler_outputs)
+
+        self._process_aborts_queue()
+        engine_core_outputs = self.scheduler.update_from_output_v1(
+            scheduler_outputs, model_outputs
+        )
+        
+        total = sum(so.total_num_scheduled_tokens for so in scheduler_outputs)
+        return engine_core_outputs, total > 0
 
     def post_step(self, model_executed: bool) -> None:
         # When using async scheduling we can't get draft token ids in advance,

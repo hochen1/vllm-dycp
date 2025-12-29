@@ -99,7 +99,8 @@ class ExampleConnector(KVConnectorBase_V1):
             kv_cache_config=kv_cache_config,
         )
         self._block_size = vllm_config.cache_config.block_size
-        self._requests_need_load: dict[str, Request] = {}
+        # self._requests_need_load: dict[str, Request] = {}
+        self._cross_requests_need_load: list[dict[str, Request]] = [{} for _ in range(vllm_config.parallel_config.decode_context_parallel_size)]
         self._storage_path = self._kv_transfer_config.get_from_extra_config(
             "shared_storage_path", "/tmp"
         )
@@ -303,7 +304,9 @@ class ExampleConnector(KVConnectorBase_V1):
         such that we load the KVs in the next forward pass.
         """
         if num_external_tokens > 0:
-            self._requests_need_load[request.request_id] = request
+            for dcp_rank in request.dcp_ranks:
+                self._cross_requests_need_load[dcp_rank][request.request_id] = request
+            # self._requests_need_load[request.request_id] = request
 
     def build_connector_meta(
         self,
@@ -323,7 +326,8 @@ class ExampleConnector(KVConnectorBase_V1):
         for new_req in scheduler_output.scheduled_new_reqs:
             token_ids = new_req.prompt_token_ids or []
             mm_hashes = [f.identifier for f in new_req.mm_features]
-            if new_req.req_id in self._requests_need_load:
+            # if new_req.req_id in self._requests_need_load:
+            if new_req.req_id in self._cross_requests_need_load[scheduler_output.cp_rank]:
                 meta.add_request(
                     token_ids=token_ids,
                     block_ids=new_req.block_ids[0],
@@ -349,7 +353,7 @@ class ExampleConnector(KVConnectorBase_V1):
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for i, req_id in enumerate(cached_reqs.req_ids):
             resumed_from_preemption = req_id in cached_reqs.resumed_req_ids
-            if not resumed_from_preemption or req_id not in self._requests_need_load:
+            if not resumed_from_preemption or req_id not in self._cross_requests_need_load[scheduler_output.cp_rank]:
                 continue
 
             num_computed_tokens = cached_reqs.num_computed_tokens[i]
@@ -359,7 +363,7 @@ class ExampleConnector(KVConnectorBase_V1):
             # NOTE(rob): cached_req_data does not have the full
             # list of token ids (only new tokens). So we look it
             # up in the actual request object.
-            request = self._requests_need_load[req_id]
+            request = self._cross_requests_need_load[scheduler_output.cp_rank][req_id]
             total_tokens = num_computed_tokens + num_new_tokens
             token_ids = request.all_token_ids[:total_tokens]
 
@@ -377,8 +381,8 @@ class ExampleConnector(KVConnectorBase_V1):
             )
             total_need_load += 1
 
-        assert total_need_load == len(self._requests_need_load)
-        self._requests_need_load.clear()
+        assert total_need_load == len(self._cross_requests_need_load[scheduler_output.cp_rank])
+        self._cross_requests_need_load[scheduler_output.cp_rank].clear()
         return meta
 
     # ==============================

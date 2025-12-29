@@ -207,6 +207,12 @@ class SchedulerOutput:
     # EC Cache Connector metadata
     ec_connector_metadata: ECConnectorMetadata | None = None
 
+    cp_rank: int = 0
+
+    cp_size_scheduled_tokens: dict[str, int]
+    
+    num_cp_request: int = 0
+    
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(
