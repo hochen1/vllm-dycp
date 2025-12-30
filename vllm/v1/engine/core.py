@@ -426,7 +426,7 @@ class EngineCore:
             scheduler_outputs, model_outputs
         )
         
-        total = sum(so.total_num_scheduled_tokens for so in scheduler_outputs)
+        total = sum(so.total_num_scheduled_tokens if so is not None else 0 for so in scheduler_outputs)
         return engine_core_outputs, total > 0
 
     def post_step(self, model_executed: bool) -> None:

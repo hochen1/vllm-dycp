@@ -179,7 +179,9 @@ class KVOutputAggregator:
         combined_kv_cache_events = None
         invalid_block_ids = set[int]()
         for model_runner_output in outputs:
-            assert model_runner_output is not None
+            # assert model_runner_output is not None
+            if not isinstance(model_runner_output, ModelRunnerOutput):
+                continue
             kv_output = model_runner_output.kv_connector_output
             if not kv_output:
                 continue
@@ -237,7 +239,9 @@ class KVOutputAggregator:
         # output = outputs[output_rank]
 
         for output in outputs:
-            assert output is not None
+            # assert output is not None
+            if not isinstance(model_runner_output, ModelRunnerOutput):
+                continue
             output.kv_connector_output = KVConnectorOutput(
                 finished_sending=finished_sending or None,
                 finished_recving=finished_recving or None,
