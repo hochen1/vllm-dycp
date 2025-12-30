@@ -2537,7 +2537,7 @@ class Scheduler(SchedulerInterface):
 
         total_scheduler_output = []
         for idx in range(self.dcp_world_size):
-            if sum(num_scheduled_tokens[idx].values()) == 0 and len(preempted_reqs[idx]) == 0 and len(self.finished_req_ids) == 0:
+            if sum(num_scheduled_tokens[idx].values()) == 0 and len(preempted_reqs[idx]) == 0 and len(self.finished_req_ids[idx]) == 0:
                 total_scheduler_output.append(None)
             else:
                 total_scheduler_output.append(

@@ -193,6 +193,8 @@ class SchedulerOutput:
     # freed from the encoder cache.
     free_encoder_mm_hashes: list[str]
 
+    cp_size_scheduled_tokens: dict[str, int]
+
     # Request IDs that are preempted in this step.
     # Only used for v2 model runner.
     preempted_req_ids: set[str] | None = None
@@ -208,8 +210,6 @@ class SchedulerOutput:
     ec_connector_metadata: ECConnectorMetadata | None = None
 
     cp_rank: int = 0
-
-    cp_size_scheduled_tokens: dict[str, int]
     
     num_cp_request: int = 0
     
@@ -225,6 +225,7 @@ class SchedulerOutput:
             num_common_prefix_blocks=[],
             finished_req_ids=set(),
             free_encoder_mm_hashes=[],
+            cp_size_scheduled_tokens={},
         )
 
 
