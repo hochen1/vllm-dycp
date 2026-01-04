@@ -187,7 +187,6 @@ class CrossDPKVCacheCoordinatorNoPrefixCache:
         
         blocks = []
         results = self._distribute_tokens_to_dcp_ranks(len(dcp_ranks), num_tokens)
-        print(f"results={results}", flush=True)
         for idx, rank in enumerate(dcp_ranks):
             blocks.append(
                 tuple(

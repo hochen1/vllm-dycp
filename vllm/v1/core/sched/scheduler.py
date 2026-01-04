@@ -2498,7 +2498,7 @@ class Scheduler(SchedulerInterface):
             + len(list(chain.from_iterable(scheduled_resumed_reqs)))
             + len(list(chain.from_iterable(scheduled_running_reqs)))
         )
-        assert total_scheduled <= self.max_num_running_reqs
+        assert total_scheduled <= self.max_num_running_reqs * self.dcp_world_size
 
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
@@ -2536,10 +2536,17 @@ class Scheduler(SchedulerInterface):
             self.prev_step_scheduled_req_ids.update(scheduled_tokens.keys())
 
         total_scheduler_output = []
+        have_total_num_scheduled_tokens_zero_output = False
+
         for idx in range(self.dcp_world_size):
+
+            print(sum(num_scheduled_tokens[idx].values()), len(preempted_reqs[idx]), len(self.finished_req_ids[idx]))
+
             if sum(num_scheduled_tokens[idx].values()) == 0 and len(preempted_reqs[idx]) == 0 and len(self.finished_req_ids[idx]) == 0:
                 total_scheduler_output.append(None)
             else:
+                if sum(num_scheduled_tokens[idx].values()) == 0:
+                    have_total_num_scheduled_tokens_zero_output = True
                 total_scheduler_output.append(
                     SchedulerOutput(
                         scheduled_new_reqs=total_new_reqs_data[idx],
@@ -2558,7 +2565,7 @@ class Scheduler(SchedulerInterface):
                         free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
                         cp_rank=idx,
                         cp_size_scheduled_tokens=cp_size_scheduled_tokens[idx],
-                        num_cp_request=sum([1 if cp_size > 1 else 0 for cp_size in  cp_size_scheduled_tokens])
+                        num_cp_request=sum([1 if cp_size > 1 else 0 for cp_size in  cp_size_scheduled_tokens[idx].values()])
                         # cp_size_scheduled_tokens[rank][request.request_id] = len(request.dcp_ranks)
                     )
                 )
@@ -2582,4 +2589,4 @@ class Scheduler(SchedulerInterface):
                     continue
                 self._update_after_schedule(scheduler_output)
         
-        return total_scheduler_output
+        return total_scheduler_output, have_total_num_scheduled_tokens_zero_output

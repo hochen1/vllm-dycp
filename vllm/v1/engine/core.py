@@ -383,31 +383,58 @@ class EngineCore:
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
-        scheduler_outputs = self.scheduler.schedule_v1()
+        (scheduler_outputs, skip_this_schedule) = self.scheduler.schedule_v1()
         """
          scheduler_outputs: [None, out, None, out]
         """
+        only_finished_scheduler_outputs = []
+        exec_scheduler_outputs = []
 
+        only_finished_outputs = []
+        only_finished_idx = []
+
+        if skip_this_schedule:
+            for idx, sched_out in enumerate(scheduler_outputs):
+                if sched_out is not None and sched_out.total_num_scheduled_tokens == 0:
+                    only_finished_scheduler_outputs.append(sched_out)
+                    exec_scheduler_outputs.append(None)
+                    only_finished_idx.append(idx)
+                else:
+                    only_finished_scheduler_outputs.append(False)
+                    exec_scheduler_outputs.append(sched_out)
+            
+            # temp_scheduler_outputs = [sched_out if sched_out.total_num_scheduled_tokens == 0 else False for sched_out in scheduler_outputs]
+            only_finished_outputs = self.model_executor.execute_model_v1(only_finished_scheduler_outputs, non_block=False)
+        
         """
             [false, None, false, model_runner_output]
             false: dummy run;
             None: total_scheduled_num > 0
             model_runner_output: total_scheduled_num = 0
         """
-        future = self.model_executor.execute_model_v1(scheduler_outputs, non_block=True)
-        
+        future = self.model_executor.execute_model_v1(scheduler_outputs if len(exec_scheduler_outputs) == 0 else exec_scheduler_outputs, non_block=True)
+
         # print("finished Model outputs", execute_outputs, flush=True)
         with self.log_error_detail(scheduler_outputs):
             execute_outputs = future.result()
+            for finished_idx in only_finished_idx:
+                execute_outputs[finished_idx] = only_finished_outputs[finished_idx]
             
+            sample_outputs = [False] * len(execute_outputs)
+
+            logger.info("execute_model_v1 have been done !")
             if None in execute_outputs:
                 if isinstance(scheduler_outputs, list):
                     # grammar_output = None
                     grammar_output = [None if mo is None else True for mo in execute_outputs]
+                    logger.info(f"sample_tokens_v1 input:  grammar_output={grammar_output}")
                 sample_outputs = self.model_executor.sample_tokens_v1(grammar_output)
+                logger.info("sample_outputs have been done !")
                 """
                     [false, model_runner_output, false, false]
                 """
+
+        logger.info("Begin to process model output !")
 
         model_outputs = []
         for exec_out, sample_out in zip(execute_outputs, sample_outputs):
