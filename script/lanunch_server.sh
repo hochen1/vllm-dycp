@@ -13,7 +13,7 @@ export TORCHDYNAMO_DISABLE=1
 source ./hccl_buff_size.sh
 source ./common.sh
 ulimit -n 1048576
-vllm serve /DeepSeek-V2-Lite \
+vllm serve /<your-model-path> \
     --port 8100 \
     $EXTRA_PARAMS \
     $COMMON_ARGS \
