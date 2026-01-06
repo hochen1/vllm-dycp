@@ -1,5 +1,7 @@
 # vLLM-DYCP
-+ support Dynamic Context parellem on Decoders
+support Dynamic Context parellem on Decoders, Currently, only the vLLM-Ascend plugin is supported; native vLLM support is planned.
+Implemented mixed execution of CP and non-CP requests within a single batch. Due to graph constraints, currently a batch can contain at most two CP requests, controlled by a magic number; future work will aim to remove this limitation.
+
 ## install vLLM
 ``` shell
 VLLM_TARGET_DEVICE=empty pip install -U -e . -i https://pypi.antfin-inc.com/simple/
