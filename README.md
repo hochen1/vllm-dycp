@@ -1,21 +1,21 @@
 # vLLM-DYCP
-support Dynamic Context parellem on Decoders, Currently, only the vLLM-Ascend plugin is supported; native vLLM support is planned.
-Implemented mixed execution of CP and non-CP requests within a single batch. Due to graph constraints, currently a batch can contain at most two CP requests, controlled by a magic number; future work will aim to remove this limitation.
-
-## install vLLM
+Support Dynamic Context parellem on decode instance, currently, only the vLLM-Ascend plugin is supported; native vLLM support is planned.
+## System Overview
+![alt text](./image/dycp.png)
+## Install vLLM
 ``` shell
 VLLM_TARGET_DEVICE=empty pip install -U -e . -i https://pypi.antfin-inc.com/simple/
 ```
-## install vLLM-Ascend
+## Install vLLM-Ascend
 ```shell
 # torch_npu ：torch_npu-2.8.0.post1-cp311-cp311-manylinux_2_28_aarch64.whl
 COMPILE_CUSTOM_KERNELS=0 pip install -e . --no-build-isolation --no-deps -i https://pypi.antfin-inc.com/simple/
 ```
 
-## launch server
+## Launch Server
 Currently, only the Example connector is supported for performance testing; PD separation is still under development.
 ```shell
-export DATA_PARALLEL_HEAD_ADDRESS=${DATA_PARALLEL_HEAD_ADDRESS:-"33.182.140.47"}
+export DATA_PARALLEL_HEAD_ADDRESS=${DATA_PARALLEL_HEAD_ADDRESS:-"master ip"}
 export VLLM_TORCH_PROFILER_DIR=./profile
 current_dir=$(dirname "$0")
 export VLLM_TORCH_PROFILER_DIR=${VLLM_TORCH_PROFILER_DIR:-"./profiles"}
@@ -24,8 +24,8 @@ export VLLM_TORCH_PROFILER_WITH_STACK=0
 rm -rf $VLLM_TORCH_PROFILER_DIR
 mkdir -p $VLLM_TORCH_PROFILER_DIR
 export TORCHDYNAMO_DISABLE=1
-source ./hccl_buff_size.sh
-source "./common.sh"
+source ./script/hccl_buff_size.sh
+source ./script/common.sh
 ulimit -n 1048576
 vllm serve /DeepSeek-V2-Lite \
     --port 8100 \
