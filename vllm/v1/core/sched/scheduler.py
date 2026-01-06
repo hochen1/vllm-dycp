@@ -1993,7 +1993,6 @@ class Scheduler(SchedulerInterface):
                 # Get prompt logprobs for this request.
                 prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
                 if new_token_ids or pooler_output is not None or kv_transfer_params:
-                    print("Why not here !" * 10)
                     # Add EngineCoreOutput for this Request.
                     outputs[request.client_index].append(
                         EngineCoreOutput(

@@ -422,19 +422,15 @@ class EngineCore:
             
             sample_outputs = [False] * len(execute_outputs)
 
-            logger.info("execute_model_v1 have been done !")
             if None in execute_outputs:
                 if isinstance(scheduler_outputs, list):
                     # grammar_output = None
                     grammar_output = [None if mo is None else True for mo in execute_outputs]
                     logger.info(f"sample_tokens_v1 input:  grammar_output={grammar_output}")
                 sample_outputs = self.model_executor.sample_tokens_v1(grammar_output)
-                logger.info("sample_outputs have been done !")
                 """
                     [false, model_runner_output, false, false]
                 """
-
-        logger.info("Begin to process model output !")
 
         model_outputs = []
         for exec_out, sample_out in zip(execute_outputs, sample_outputs):
