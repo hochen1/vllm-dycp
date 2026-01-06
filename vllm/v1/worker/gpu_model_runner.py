@@ -1132,6 +1132,10 @@ class GPUModelRunner(
         num_tokens: np.ndarray,
         cumsum_dtype: np.dtype | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
+        # When a batch contains a mix of DCP requests and normal requests, it is possible for either dcp_tokens or normal_tokens to be empty.
+        # when num_tokens is empty, return empty arrays
+        if len(num_tokens) == 0:
+            return np.array([]), np.array([]) 
         """Get the cumulative sum and batched arange of the given array.
         # E.g., [2, 5, 3] -> ([2, 7, 10], [0, 1, 0, 1, 2, 3, 4, 0, 1, 2])
         # Equivalent to but faster than:

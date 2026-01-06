@@ -513,7 +513,6 @@ class DeepseekV2Attention(nn.Module):
             scaling_factor = config.rope_parameters["factor"]
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             self.scaling = self.scaling * mscale * mscale
-        logger.info(f"chenxiao--debug self.num_local_heads:{self.num_local_heads}")
         self.attn = Attention(
             self.num_local_heads,
             self.qk_head_dim,

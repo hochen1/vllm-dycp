@@ -1217,7 +1217,7 @@ def reorder_batch_to_split_cp_and_normal(
 ) -> bool:
     """Move CP-flagged requests to the front of the batch."""
     req_ids = input_batch.req_ids
-    is_cp = np.array([True if scheduler_output.cp_size_scheduled_tokens[rid] > 1 else False for rid in req_ids])
+    is_cp = np.array([True if scheduler_output.cp_rank_scheduled_tokens[rid] > 1 else False for rid in req_ids])
     if not is_cp.any() or is_cp.all():
         return False
     tgt = np.arange(len(req_ids))

@@ -2115,7 +2115,7 @@ class Scheduler(SchedulerInterface):
 
         req_to_new_blocks: list[dict[str, KVCacheBlocks]] = [{} for _ in range(self.dcp_world_size)]
         num_scheduled_tokens: list[dict[str, int]] = [{} for _ in range(self.dcp_world_size)]
-        cp_size_scheduled_tokens: list[dict[str, int]] = [{} for _ in range(self.dcp_world_size)]
+        cp_rank_scheduled_tokens: list[dict[str, int]] = [{} for _ in range(self.dcp_world_size)]
 
         """
         TODO(AoChen): Token budget for each DCP rank is not implemented yet.
@@ -2247,7 +2247,8 @@ class Scheduler(SchedulerInterface):
             # num_scheduled_tokens[request.request_id] = num_new_tokens
             for rank in request.dcp_ranks:
                 num_scheduled_tokens[rank][request.request_id] = num_new_tokens
-                cp_size_scheduled_tokens[rank][request.request_id] = len(request.dcp_ranks)
+                if len(request.dcp_ranks) != 1:
+                    cp_rank_scheduled_tokens[rank][request.request_id] = len(request.dcp_ranks)
             
             logger.info(f"req_id={request.request_id}, num_scheduled_tokens={num_scheduled_tokens}, ranks: {request.dcp_ranks}")
 
@@ -2463,8 +2464,8 @@ class Scheduler(SchedulerInterface):
                 """
                 for rank in request.dcp_ranks:
                     num_scheduled_tokens[rank][request.request_id] = num_new_tokens
-                    cp_size_scheduled_tokens[rank][request.request_id] = len(request.dcp_ranks)
-                
+                    if len(request.dcp_ranks) != 1:
+                        cp_rank_scheduled_tokens[rank][request.request_id] = len(request.dcp_ranks)
                 # num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
@@ -2564,9 +2565,9 @@ class Scheduler(SchedulerInterface):
                         finished_req_ids=self.finished_req_ids[idx],
                         free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
                         cp_rank=idx,
-                        cp_size_scheduled_tokens=cp_size_scheduled_tokens[idx],
-                        num_cp_request=sum([1 if cp_size > 1 else 0 for cp_size in  cp_size_scheduled_tokens[idx].values()])
-                        # cp_size_scheduled_tokens[rank][request.request_id] = len(request.dcp_ranks)
+                        cp_rank_scheduled_tokens=cp_rank_scheduled_tokens[idx],
+                        num_cp_request=sum([1 if cp_size > 1 else 0 for cp_size in  cp_rank_scheduled_tokens[idx].values()])
+                        # cp_rank_scheduled_tokens[rank][request.request_id] = len(request.dcp_ranks)
                     )
                 )
         # NOTE(Kuntai): this function is designed for multiple purposes:
