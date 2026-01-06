@@ -45,6 +45,7 @@ from vllm.v1.engine.utils import (
     CoreEngineActorManager,
     CoreEngineProcManager,
     launch_core_engines,
+    launch_domain_core_engines,
 )
 from vllm.v1.executor import Executor
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
@@ -474,7 +475,12 @@ class MPClient(EngineCoreClient):
                 self.stats_update_address = client_addresses.get("stats_update_address")
             else:
                 # Engines are managed by this client.
-                with launch_core_engines(vllm_config, executor_class, log_stats) as (
+                # with launch_core_engines(vllm_config, executor_class, log_stats) as (
+                #     engine_manager,
+                #     coordinator,
+                #     addresses,
+                # ):
+                with launch_domain_core_engines(vllm_config, executor_class, log_stats) if vllm_config.parallel_config.dp_per_domain > 1 else launch_core_engines(vllm_config, executor_class, log_stats) as (
                     engine_manager,
                     coordinator,
                     addresses,

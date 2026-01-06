@@ -274,6 +274,18 @@ class ParallelConfig:
         should only be set by API server scale-out.
     """
 
+    dp_per_domain: int = Field(default=1, ge=-1)
+    """Number of data parallel groups per domain."""
+
+    domain_parallel_rank: int = Field(default=0, ge=-1)
+    """Domain parallel rank."""
+    domain_parallel_rank_local: int = Field(default=0, ge=-1)
+    """Domain parallel rank local."""
+    domain_parallel_start_rank: int = Field(default=0, ge=-1)
+    """Domain parallel start rank."""
+    domain_parallel_start_rank_local: int = Field(default=0, ge=-1)
+    """Domain parallel start rank local."""
+
     @model_validator(mode="after")
     def _validate_parallel_config(self) -> Self:
         if self._api_process_rank >= self._api_process_count:

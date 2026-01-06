@@ -89,7 +89,13 @@ class EngineCore:
         load_general_plugins()
 
         self.vllm_config = vllm_config
-        if vllm_config.parallel_config.data_parallel_rank == 0:
+        if vllm_config.parallel_config.dp_per_domain > 1:
+            logger.info(
+                "Initializing a V1 LLM engine (v%s) with config: %s",
+                VLLM_VERSION,
+                vllm_config,
+            )
+        elif vllm_config.parallel_config.data_parallel_rank == 0:
             logger.info(
                 "Initializing a V1 LLM engine (v%s) with config: %s",
                 VLLM_VERSION,
@@ -99,6 +105,9 @@ class EngineCore:
         self.log_stats = log_stats
 
         # Setup Model.
+        """
+        It seems vllm_config have contain dp_per_domain * tp per dp
+        """
         self.model_executor = executor_class(vllm_config)
         if executor_fail_callback is not None:
             self.model_executor.register_failure_callback(executor_fail_callback)
@@ -818,6 +827,61 @@ class EngineCoreProc(EngineCore):
                 setattr(parallel_config, key, value)
 
         return init_message.addresses
+
+    @staticmethod
+    def run_domin_engine_core(*args, domain_rank: int = 0, local_domain_rank: int = 0, **kwargs):
+        """Launch EngineCore busy loop in background process."""
+
+        # Signal handler used for graceful termination.
+        # SystemExit exception is only raised once to allow this and worker
+        # processes to terminate without error
+        shutdown_requested = False
+
+        # Ensure we can serialize transformer config after spawning
+        maybe_register_config_serialize_by_value()
+
+        def signal_handler(signum, frame):
+            nonlocal shutdown_requested
+            if not shutdown_requested:
+                shutdown_requested = True
+                raise SystemExit()
+
+        # Either SIGTERM or SIGINT will terminate the engine_core
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+
+        engine_core: EngineCoreProc | None = None
+        try:
+            parallel_config: ParallelConfig = kwargs["vllm_config"].parallel_config
+            if parallel_config.data_parallel_size // parallel_config.dp_per_domain > 1:
+                set_process_title("EngineCore", f"Domain{domain_rank}")
+                decorate_logs()
+                # Set data parallel rank for this engine process.
+                parallel_config.domain_parallel_rank = domain_rank
+                parallel_config.domain_parallel_rank_local = local_domain_rank
+                engine_core = DPEngineCoreProc(*args, **kwargs)
+                assert False, "DomainEngineCoreProc is not implemented yet"
+            else:
+                set_process_title("EngineCore")
+                decorate_logs()
+                engine_core = EngineCoreProc(*args, **kwargs)
+            
+            engine_core.run_busy_loop()
+        
+        except SystemExit:
+            logger.debug("EngineCore exiting.")
+            raise
+        except Exception as e:
+            if engine_core is None:
+                logger.exception("EngineCore failed to start.")
+            else:
+                logger.exception("EngineCore encountered a fatal error.")
+                engine_core._send_engine_dead()
+            raise e
+        finally:
+            if engine_core is not None:
+                engine_core.shutdown()
+
 
     @staticmethod
     def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):

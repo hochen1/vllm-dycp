@@ -573,6 +573,9 @@ class EngineArgs:
     )
     tokens_only: bool = False
 
+    # domain parallel config
+    dp_per_domain: int = ParallelConfig.dp_per_domain
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -874,6 +877,16 @@ class EngineArgs:
         parallel_group.add_argument("--worker-cls", **parallel_kwargs["worker_cls"])
         parallel_group.add_argument(
             "--worker-extension-cls", **parallel_kwargs["worker_extension_cls"]
+        )
+
+        # dp_per_domain
+        parallel_group.add_argument(
+            "--dp-per-domain", 
+            "-dpd",
+            type=int, 
+            help= "The number of data parallel groups per domain.",
+            default=1,
+            **parallel_kwargs["dp_per_domain"]
         )
 
         # KV cache arguments
@@ -1576,6 +1589,9 @@ class EngineArgs:
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
+
+            # domain parallel config
+            dp_per_domain=self.dp_per_domain,
         )
 
         speculative_config = self.create_speculative_config(
