@@ -118,6 +118,7 @@ class ExampleConnector(KVConnectorBase_V1):
             The number of elements in kv_caches and layer_names should be
             the same.
         """
+        return
         attn_metadata = forward_context.attn_metadata
 
         def inject_kv_into_layer(
@@ -214,6 +215,7 @@ class ExampleConnector(KVConnectorBase_V1):
         attn_metadata: AttentionMetadata,
         **kwargs: Any,
     ) -> None:
+        return
         """Start saving the KV cache of the layer from vLLM's paged buffer
         to the connector.
 
@@ -279,6 +281,7 @@ class ExampleConnector(KVConnectorBase_V1):
         # NOTE: in current v1 scheduler, the num_computed_tokens is aligned
         # with the block granularity. And it expects the returned blocks and
         # num_computed_tokens to also be aligned with the block granularity.
+        return len(request.prompt_token_ids) - 1, False
         if not self._found_match_for_request(request):
             return 0, False
 
