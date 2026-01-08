@@ -56,6 +56,8 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerWrapperBase
+from vllm.v1.engine.utils import set_device_control_env_var
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -444,10 +446,13 @@ class DomainMultiprocExecutor(MultiprocExecutor):
         self.is_failed = False
         self.shutdown_event = threading.Event()
         self.failure_callback: FailureCallback | None = None
-
+        """
+        AOCHEN: world_size and local_world_size is used to be per_dp_size, now is per_domain_size
+        """
         self.world_size = self.parallel_config.world_size * self.parallel_config.dp_per_domain
-
         self.local_world_size = self.parallel_config.local_world_size * self.parallel_config.dp_per_domain
+        per_dp_size = self.parallel_config.local_world_size
+
         tp_size = self.parallel_config.tensor_parallel_size
         pp_size = self.parallel_config.pipeline_parallel_size
         dp_per_domain = self.parallel_config.dp_per_domain
@@ -483,12 +488,30 @@ class DomainMultiprocExecutor(MultiprocExecutor):
         success = False
 
         try:
-            global_start_index = self.parallel_config.domain_parallel_rank * dp_per_domain
-
+            dp_start_rank = self.parallel_config.domain_parallel_rank * dp_per_domain
+            local_dp_start_rank = self.parallel_config.domain_parallel_rank_local * dp_per_domain
+            global_start_rank = (
+                dp_start_rank * per_dp_size
+            )
             for local_rank in range(self.local_world_size):
-                global_rank = global_start_index + local_rank
-                unready_workers.append(
-                    WorkerProc.make_worker_process(
+                global_rank = global_start_rank + local_rank
+                dp_rank = dp_start_rank + local_rank // per_dp_size
+                self.vllm_config.parallel_config.data_parallel_rank = dp_rank
+                self.vllm_config.parallel_config.data_parallel_rank_local = (
+                    local_dp_start_rank + local_rank // per_dp_size
+                )
+                
+                with set_device_control_env_var(
+                    self.vllm_config, self.vllm_config.parallel_config.data_parallel_rank_local
+                ):
+                    logger.info(
+                        "Woker Rank Info: local_rank=%d, rank=%d, global_dp_rank=%d, local_dp_rank=%d, visabel device=%s",
+                        local_rank, global_rank, 
+                        self.vllm_config.parallel_config.data_parallel_rank, 
+                        self.vllm_config.parallel_config.data_parallel_rank_local,
+                        os.environ.get(current_platform.device_control_env_var, "Not Set Yet")
+                    )
+                    worker_proc = WorkerProc.make_worker_process(
                         vllm_config=self.vllm_config,
                         local_rank=local_rank,
                         rank=global_rank,
@@ -496,7 +519,7 @@ class DomainMultiprocExecutor(MultiprocExecutor):
                         input_shm_handle=scheduler_output_handle,
                         shared_worker_lock=shared_worker_lock,
                     )
-                )
+                unready_workers.append(worker_proc)
 
             # Workers must be created before wait_for_ready to avoid
             # deadlock, since worker.init_device() does a device sync.
@@ -596,8 +619,12 @@ class WorkerProc:
     ) -> None:
         if vllm_config.parallel_config.nnodes_within_dp == 1:
             # Initialize MessageQueue for receiving SchedulerOutput
+            """
+                (AOCHEN): Use self.worker.rank is unreasonable.
+                """
             self.rpc_broadcast_mq = MessageQueue.create_from_handle(
-                input_shm_handle, self.worker.rank
+                # input_shm_handle, self.worker.rank
+                input_shm_handle, self.rank
             )
 
             # Initializes a message queue for sending the model output
@@ -638,7 +665,9 @@ class WorkerProc:
         )
         # TODO: move `init_worker` to executor level as a collective rpc call
         all_kwargs: list[dict] = [
-            {} for _ in range(vllm_config.parallel_config.world_size)
+            {} for _ in range(
+                vllm_config.parallel_config.world_size * vllm_config.parallel_config.dp_per_domain
+            )
         ]
         is_driver_worker = rank % vllm_config.parallel_config.tensor_parallel_size == 0
         all_kwargs[local_rank] = {

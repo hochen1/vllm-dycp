@@ -829,8 +829,12 @@ class EngineCoreProc(EngineCore):
         return init_message.addresses
 
     @staticmethod
-    def run_domin_engine_core(*args, domain_rank: int = 0, local_domain_rank: int = 0, **kwargs):
+    def run_domain_engine_core(*args, domain_rank: int = 0, local_domain_rank: int = 0, **kwargs):
         """Launch EngineCore busy loop in background process."""
+
+        logger.info("*" * 25)
+        logger.info(f"{'Run domain engine core !':^25}")
+        logger.info("*" * 25)
 
         # Signal handler used for graceful termination.
         # SystemExit exception is only raised once to allow this and worker

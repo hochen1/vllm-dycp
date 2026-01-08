@@ -883,9 +883,6 @@ class EngineArgs:
         parallel_group.add_argument(
             "--dp-per-domain", 
             "-dpd",
-            type=int, 
-            help= "The number of data parallel groups per domain.",
-            default=1,
             **parallel_kwargs["dp_per_domain"]
         )
 

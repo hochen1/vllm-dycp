@@ -921,7 +921,7 @@ def wait_for_engine_startup(
     coord_process: Process | None,
 ):
     # Wait for engine core process(es) to send ready messages.
-    local_count = parallel_config.data_parallel_size_local
+    local_count = parallel_config.data_parallel_size_local // parallel_config.dp_per_domain
     remote_count = len(core_engines) - local_count
     # [local, remote] counts
     conn_pending, start_pending = [local_count, remote_count], [0, 0]
@@ -1222,8 +1222,21 @@ def launch_domain_core_engines(
         ],
     )
 
-    run_coordinator = False
-    coordinator = None
+    run_coordinator = dp_size > 1 and domain_rank == 0
+
+    if run_coordinator:
+        coordinator = DPCoordinator(parallel_config)
+
+        addresses.coordinator_input, addresses.coordinator_output = (
+            coordinator.get_engine_socket_addresses()
+        )
+        addresses.frontend_stats_publish_address = (
+            coordinator.get_stats_publish_address()
+        )
+
+        logger.info("Started DP Coordinator process (PID: %d)", coordinator.proc.pid)
+    else:
+        coordinator = None
 
     if domain_rank == 0:
         engines_to_handshake = [
@@ -1286,7 +1299,6 @@ def launch_domain_core_engines(
             addresses,
             engines_to_handshake,
             parallel_config,
-            domain_size > 1 and vllm_config.model_config.is_moe,
             vllm_config.cache_config,
             local_engine_manager,
             coordinator.proc if coordinator else None,

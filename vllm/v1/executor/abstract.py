@@ -63,6 +63,11 @@ class Executor(ABC):
             from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 
             executor_class = MultiprocExecutor
+        elif distributed_executor_backend == "dmp":
+            assert vllm_config.parallel_config.dp_per_domain > 1, "dmp is used for domain parallel"
+            from vllm.v1.executor.multiproc_executor import DomainMultiprocExecutor
+
+            executor_class = DomainMultiprocExecutor
         elif distributed_executor_backend == "uni":
             from vllm.v1.executor.uniproc_executor import UniProcExecutor
 
