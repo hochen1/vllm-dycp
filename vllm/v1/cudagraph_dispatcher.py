@@ -59,7 +59,7 @@ class CudagraphDispatcher:
         self.keys_initialized = False
 
     def _create_padded_batch_descriptor(
-        self, num_tokens: int, uniform_decode: bool, has_lora: bool, num_cp_tokens: int
+        self, num_tokens: int, uniform_decode: bool, has_lora: bool, num_cp_tokens: int = 0
     ) -> BatchDescriptor:
         max_num_seqs = self.vllm_config.scheduler_config.max_num_seqs
         uniform_decode_query_len = self.uniform_decode_query_len

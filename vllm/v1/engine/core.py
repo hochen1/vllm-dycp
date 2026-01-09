@@ -833,7 +833,7 @@ class EngineCoreProc(EngineCore):
         return init_message.addresses
 
     @contextmanager
-    def log_domain_error_detail(self, scheduler_outputs: list[SchedulerOutput | Nonr]):
+    def log_domain_error_detail(self, scheduler_outputs: list[SchedulerOutput | None]):
         """Execute the model and log detailed info on failure."""
         try:
             yield

@@ -613,7 +613,7 @@ class CompilationConfig:
         "vllm::sparse_attn_indexer",
     ]
 
-    cudagraph_capture_sizes_for_cp: int = field(default=0, ge=-1)
+    cudagraph_capture_sizes_for_cp: int = field(default=0)
     """
     For cp tokens
     The number of cp tokens in each cudagraph
