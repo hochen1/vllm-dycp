@@ -1210,3 +1210,21 @@ def get_dcp_local_seq_lens(
     )
     dcp_local_seq_lens = base + remainder
     return dcp_local_seq_lens.squeeze(1)
+
+def reorder_batch_to_split_cp_and_normal(
+    input_batch: "InputBatch",
+    scheduler_output: "SchedulerOutput",
+) -> bool:
+    """Move CP-flagged requests to the front of the batch."""
+    req_ids = input_batch.req_ids
+    is_cp = np.array([True if scheduler_output.cp_rank_scheduled_tokens[rid] > 1 else False for rid in req_ids])
+    if not is_cp.any() or is_cp.all():
+        return False
+    tgt = np.arange(len(req_ids))
+    tgt_cp, tgt_ncp = tgt[is_cp], tgt[~is_cp]
+    tgt[:] = np.concatenate([tgt_cp, tgt_ncp])
+    for src, dst in enumerate(tgt):
+        while src != dst:
+            input_batch.swap_states(src, dst)
+            src, dst = dst, tgt[dst]
+    return True

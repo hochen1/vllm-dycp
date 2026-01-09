@@ -1119,6 +1119,13 @@ class EngineArgs:
             "--max-cudagraph-capture-size",
             **compilation_kwargs["max_cudagraph_capture_size"],
         )
+        
+        # For cp tokens, the max number of cp tokens in a batch.
+        compilation_group.add_argument(
+            "--cudagraph-capture-sizes-for-cp",
+            "-cccp",
+            **compilation_kwargs["cudagraph_capture_sizes_for_cp"],
+        )
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)

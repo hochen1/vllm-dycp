@@ -126,7 +126,11 @@ class EngineCore:
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
         # Setup scheduler.
-        Scheduler = vllm_config.scheduler_config.get_scheduler_cls()
+        if vllm_config.parallel_config.dp_per_domain > 1:
+            from vllm.v1.core.sched.cross_dp_scheduler import CrossDPScheduler
+            Scheduler = CrossDPScheduler
+        else:
+            Scheduler = vllm_config.scheduler_config.get_scheduler_cls()
 
         if len(kv_cache_config.kv_cache_groups) == 0:  # noqa: SIM102
             # Encoder models without KV cache don't support
@@ -828,6 +832,107 @@ class EngineCoreProc(EngineCore):
 
         return init_message.addresses
 
+    @contextmanager
+    def log_domain_error_detail(self, scheduler_outputs: list[SchedulerOutput | Nonr]):
+        """Execute the model and log detailed info on failure."""
+        try:
+            yield
+        except Exception as err:
+            # We do not want to catch BaseException here since we're only
+            # interested in dumping info when the exception is due to an
+            # error from execute_model itself.
+
+            # NOTE: This method is exception-free
+            if isinstance(scheduler_outputs,list):
+                for sched_out in scheduler_outputs:
+                    if sched_out is False:
+                        continue
+
+                    dump_engine_exception(
+                        self.vllm_config, sched_out, self.scheduler.make_stats()
+                    )
+            raise err
+    
+    def step_domain(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
+        """Schedule, execute, and make output.
+
+        Returns tuple of outputs and a flag indicating whether the model
+        was executed.
+        """
+
+        # Check for any requests remaining in the scheduler - unfinished,
+        # or finished and not yet removed from the batch.
+        if not self.scheduler.has_requests():
+            return {}, False
+        (scheduler_outputs, skip_this_schedule) = self.scheduler.schedule()
+        """
+         scheduler_outputs: [None, out, None, out]
+        """
+        only_finished_scheduler_outputs = []
+        exec_scheduler_outputs = []
+
+        only_finished_outputs = []
+        only_finished_idx = []
+
+        if skip_this_schedule:
+            for idx, sched_out in enumerate(scheduler_outputs):
+                if sched_out is not None and sched_out.total_num_scheduled_tokens == 0:
+                    only_finished_scheduler_outputs.append(sched_out)
+                    exec_scheduler_outputs.append(None)
+                    only_finished_idx.append(idx)
+                else:
+                    only_finished_scheduler_outputs.append(False)
+                    exec_scheduler_outputs.append(sched_out)
+            
+            # temp_scheduler_outputs = [sched_out if sched_out.total_num_scheduled_tokens == 0 else False for sched_out in scheduler_outputs]
+            only_finished_outputs = self.model_executor.execute_model(only_finished_scheduler_outputs, non_block=False)
+        
+        """
+            [false, None, false, model_runner_output]
+            false: dummy run;
+            None: total_scheduled_num > 0
+            model_runner_output: total_scheduled_num = 0
+        """
+        future = self.model_executor.execute_model(scheduler_outputs if len(exec_scheduler_outputs) == 0 else exec_scheduler_outputs, non_block=True)
+
+        # print("finished Model outputs", execute_outputs, flush=True)
+        with self.log_domain_error_detail(scheduler_outputs):
+            execute_outputs = future.result()
+            for finished_idx in only_finished_idx:
+                execute_outputs[finished_idx] = only_finished_outputs[finished_idx]
+            
+            sample_outputs = [False] * len(execute_outputs)
+
+            if None in execute_outputs:
+                if isinstance(scheduler_outputs, list):
+                    # grammar_output = None
+                    grammar_output = [None if mo is None else True for mo in execute_outputs]
+                    logger.info(f"sample_tokens_v1 input:  grammar_output={grammar_output}")
+                sample_outputs = self.model_executor.sample_tokens(grammar_output)
+                """
+                    [false, model_runner_output, false, false]
+                """
+
+        model_outputs = []
+        for exec_out, sample_out in zip(execute_outputs, sample_outputs):
+            # model_outputs.append()
+            if exec_out == False and sample_out == False:
+                model_outputs.append(None)
+            elif exec_out == None and isinstance(sample_out, ModelRunnerOutput):
+                model_outputs.append(sample_out)
+            elif isinstance(exec_out, ModelRunnerOutput) and sample_out == False:
+                model_outputs.append(exec_out)
+
+        assert len(model_outputs) == len(scheduler_outputs)
+
+        self._process_aborts_queue()
+        engine_core_outputs = self.scheduler.update_from_output(
+            scheduler_outputs, model_outputs
+        )
+        
+        total = sum(so.total_num_scheduled_tokens if so is not None else 0 for so in scheduler_outputs)
+        return engine_core_outputs, total > 0
+
     @staticmethod
     def run_domain_engine_core(*args, domain_rank: int = 0, local_domain_rank: int = 0, **kwargs):
         """Launch EngineCore busy loop in background process."""
@@ -869,6 +974,7 @@ class EngineCoreProc(EngineCore):
                 set_process_title("EngineCore")
                 decorate_logs()
                 engine_core = EngineCoreProc(*args, **kwargs)
+                engine_core.step_fn = engine_core.step_domain
             
             engine_core.run_busy_loop()
         

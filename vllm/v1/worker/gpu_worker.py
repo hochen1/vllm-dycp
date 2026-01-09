@@ -567,14 +567,33 @@ class Worker(WorkerBase):
 
     @torch.inference_mode()
     def sample_tokens(
-        self, grammar_output: "GrammarOutput | None"
+        self, grammar_outputs: "GrammarOutput | None | list[GrammarOutput | True]"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
+        if isinstance(grammar_outputs, list):
+            grammar_output = grammar_outputs[self.model_runner.cp_rank]
+            if grammar_output is True:
+                return False
+        else:
+            grammar_output = grammar_outputs
         return self.model_runner.sample_tokens(grammar_output)
 
     @torch.inference_mode()
     def execute_model(
-        self, scheduler_output: "SchedulerOutput"
+        self, scheduler_outputs: "SchedulerOutput | list[SchedulerOutput | None]"
     ) -> ModelRunnerOutput | None:
+        if isinstance(scheduler_outputs, list):
+
+            scheduler_output = scheduler_outputs[self.model_runner.cp_rank]
+
+            if scheduler_output is None:
+                self.model_runner._dummy_run(1, force_attention=True, uniform_decode=True)
+                logger.info(f"{self.model_runner.cp_rank} execute dummy run !")
+                return False
+            elif scheduler_output is False:
+                return False
+        else:
+            scheduler_output = scheduler_outputs
+        
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
