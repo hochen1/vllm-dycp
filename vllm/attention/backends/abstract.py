@@ -336,6 +336,15 @@ class AttentionImpl(ABC, Generic[T]):
             self.dcp_world_size = 1
             self.dcp_rank = 0
         try:
+            from vllm.distributed.parallel_state import get_dycp_group
+
+            self.dycp_world_size = get_dycp_group().world_size
+            self.dycp_rank = get_dycp_group().rank_in_group
+        except AssertionError:
+            # DYCP might not be initialized in testing
+            self.dycp_world_size = 1
+            self.dycp_rank = 0
+        try:
             from vllm.distributed.parallel_state import get_pcp_group
 
             self.pcp_world_size = get_pcp_group().world_size

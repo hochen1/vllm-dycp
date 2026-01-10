@@ -99,6 +99,13 @@ class CommonAttentionMetadata:
     _seq_lens_cpu: torch.Tensor | None = None
     _num_computed_tokens_cpu: torch.Tensor | None = None
 
+    dycp_local_seq_lens: torch.Tensor | None = None
+    dycp_local_seq_lens_cpu: torch.Tensor | None = None
+    """Sequence lengths of the local rank in dynamic decode context parallelism world"""
+
+    num_dycp_reqs: int = 0
+
+
     @property
     @deprecated(
         """

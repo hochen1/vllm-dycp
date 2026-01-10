@@ -205,11 +205,11 @@ from vllm.attention.backends.abstract import (
     MLAAttentionImpl,
 )
 from vllm.attention.backends.utils import get_mla_dims
-from vllm.attention.ops.common import cp_lse_ag_out_rs
+from vllm.attention.ops.common import cp_lse_ag_out_rs, dycp_lse_ag_out_rs
 from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed.parallel_state import get_dcp_group, is_global_first_rank
+from vllm.distributed.parallel_state import get_dcp_group, is_global_first_rank, get_dycp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -412,7 +412,7 @@ class MLACommonMetadata(Generic[D]):
     num_decodes: int
     num_decode_tokens: int
     num_prefills: int
-
+    num_dycp_reqs: int = 0
     # The dimension of the attention heads
     head_dim: int | None = None
 
@@ -556,8 +556,19 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
+        try:
+            self.dycp_world_size = get_dycp_group().world_size
+            self.dcp_rank = get_dycp_group().rank_in_group
+        except AssertionError:
+            # DCP might not be initialized in testing
+            self.dycp_world_size = 1
+            self.dcp_rank = 0
+    
         self.dcp_local_block_size = parallel_config.cp_kv_cache_interleave_size
         self.dcp_virtual_block_size = self.dcp_local_block_size * self.dcp_world_size
+
+        self.dycp_local_block_size = parallel_config.cp_kv_cache_interleave_size
+        self.dycp_virtual_block_size = self.dycp_local_block_size * self.dycp_world_size
 
         # Don't try to access the runner on AMD
         if self.aot_schedule:
@@ -763,6 +774,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         max_query_len = common_attn_metadata.max_query_len
         max_seq_len = common_attn_metadata.max_seq_len
 
+        logger.info(f"chenxiao--debug common_attn_metadata.num_dycp_reqs:{common_attn_metadata.num_dycp_reqs}")
+        num_dycp_reqs = common_attn_metadata.num_dycp_reqs
+
         # Note(simon): be careful about the CPU <> GPU memory movement in this
         # function. We should avoid GPU -> CPU sync as much as possible because
         # it blocks on all previous kernels.
@@ -776,6 +790,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu
         dcp_local_seq_lens = common_attn_metadata.dcp_local_seq_lens
         dcp_local_seq_lens_cpu = common_attn_metadata.dcp_local_seq_lens_cpu
+        dycp_local_seq_lens = common_attn_metadata.dycp_local_seq_lens
+        dycp_local_seq_lens_cpu = common_attn_metadata.dycp_local_seq_lens_cpu
 
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
 
@@ -991,6 +1007,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 dcp_tot_seq_lens_device = seq_lens[:num_decodes]
                 seq_lens_cpu = dcp_local_seq_lens_cpu
                 seq_lens = dcp_local_seq_lens
+    
+            if self.dycp_world_size > 1:
+                seq_lens_cpu = dycp_local_seq_lens_cpu
+                seq_lens = dycp_local_seq_lens
 
             decode_metadata = self._build_decode(
                 block_table_tensor=block_table_tensor[:num_decodes, ...],
@@ -1016,6 +1036,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             num_prefills=num_prefills,
             prefill=prefill_metadata,
             decode=decode_metadata,
+            num_dycp_reqs=num_dycp_reqs,
         )
 
         if self._use_fi_prefill and num_prefills > 0:
@@ -2108,6 +2129,17 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     get_dcp_group(),
                     is_lse_base_on_e=not getattr(self, "_use_fi_prefill", False),
                 )
+
+            # if self.dycp_world_size > 1:
+            if attn_metadata.num_dycp_reqs > 0:
+                attn_out = dycp_lse_ag_out_rs(
+                    attn_out,
+                    lse,
+                    get_dycp_group(),
+                    attn_metadata.num_dycp_reqs,
+                )
+                self._v_up_proj(attn_out, out=output[:num_decode_tokens])
+                return output_padded
 
             # v_up projection
             self._v_up_proj(attn_out, out=output[:num_decode_tokens])
