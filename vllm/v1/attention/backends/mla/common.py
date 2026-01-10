@@ -774,7 +774,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         max_query_len = common_attn_metadata.max_query_len
         max_seq_len = common_attn_metadata.max_seq_len
 
-        logger.info(f"chenxiao--debug common_attn_metadata.num_dycp_reqs:{common_attn_metadata.num_dycp_reqs}")
         num_dycp_reqs = common_attn_metadata.num_dycp_reqs
 
         # Note(simon): be careful about the CPU <> GPU memory movement in this
