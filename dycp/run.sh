@@ -1,14 +1,3 @@
-# vLLM-DyCP
-Support Dynamic Context parellem on decode instance on vLLM.
-## System Overview
-![alt text](./dycp/dycp.png)
-## Install vLLM
-``` shell
-VLLM_USE_PRECOMPILED=1 uv pip install --editable .
-```
-## Launch Server
-Currently, only the CrossDPExampleConnector is supported for performance testing.
-```shell
 set -x
 
 export NCCL_DEBUG=WARN
@@ -61,4 +50,3 @@ vllm serve ${MODEL_PATH} \
              }
         }
     }'
-```

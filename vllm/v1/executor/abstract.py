@@ -47,6 +47,8 @@ class Executor(ABC):
         executor_class: type[Executor]
         parallel_config = vllm_config.parallel_config
         distributed_executor_backend = parallel_config.distributed_executor_backend
+        assert distributed_executor_backend == "dmp" and parallel_config.dp_per_domain > 1, "dmp is used for domain parallel"
+        
         # distributed_executor_backend must be set in VllmConfig.__post_init__
         if isinstance(distributed_executor_backend, type):
             if not issubclass(distributed_executor_backend, Executor):

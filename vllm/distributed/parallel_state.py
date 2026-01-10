@@ -1341,7 +1341,6 @@ def initialize_model_parallel(
     group_ranks = all_ranks.transpose(1, 4)
     domain_ranks = group_ranks.reshape(-1, config.parallel_config.dp_per_domain).unbind(0)
     domain_groups = [x.tolist() for x in domain_ranks]
-    print(domain_groups, get_world_group().local_rank, flush=True)
     _DYCP = init_model_parallel_group(
         domain_groups,
         get_world_group().local_rank,
