@@ -4,7 +4,7 @@
 import numpy as np
 import torch
 
-from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.distributed import get_dcp_group, get_pcp_group, get_dycp_group
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.utils import CpuGpuBuffer
@@ -94,6 +94,13 @@ class BlockTable:
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
+        try:
+            self.dycp_world_size = get_dycp_group().world_size
+            self.dycp_rank = get_dycp_group().rank_in_group
+        except AssertionError:
+            # DCP might not be initialized in testing
+            self.dycp_world_size = 1
+            self.dycp_rank = 0
         self.cp_kv_cache_interleave_size = cp_kv_cache_interleave_size
 
     def append_row(
@@ -188,6 +195,73 @@ class BlockTable:
                 block_offsets,
                 out=self.slot_mapping.np[: req_indices.shape[0]],
             )
+    def dycp_compute_slot_mapping(self, dcp_req_indices: np.ndarray, normal_req_indices: np.ndarray, 
+                             dcp_positions: np.ndarray, normal_positions: np.ndarray,
+                             num_dcp_req: int) -> None:
+        # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+        # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
+        # where K is the max_num_blocks_per_req and the block size is 2.
+        # NOTE(woosuk): We can't simply use `token_indices // block_size`
+        # here because M (max_model_len) is not necessarily divisible by
+        # block_size.
+        # if self.dcp_world_size * self.pcp_world_size > 1:
+        # Note(hc): The DCP implement store kvcache with an interleave
+        # style, the kvcache for the token whose token_idx is i is
+        # always stored on the GPU whose dcp_rank equals i % pcp_world_size:
+        # Use a "virtual block" which equals to world_size * block_size
+        # for block_table_indices calculation.
+        if len(dcp_req_indices):
+            virtual_block_size = self.block_size * self.dcp_world_size * self.pcp_world_size
+            # IMPORTANT: In hybrid mode, positions are in logical block space,
+            # but we need to map them to the correct logical block table indices
+            # logical_block_idx = positions // virtual_block_size
+            logical_block_idx = dcp_positions // virtual_block_size
+            # Account for the expanded logical table
+            # (always needed with unified tensor)
+            # Each physical block is split into multiple logical blocks
+            # The logical table has been expanded to accommodate this
+            dcp_block_table_indices = (dcp_req_indices * self.max_num_blocks_per_req *
+                                    self.blocks_per_phys_block +
+                                    logical_block_idx)
+            if not np.issubdtype(dcp_block_table_indices.dtype, np.integer):
+                dcp_block_table_indices = dcp_block_table_indices.astype(np.int64)
+            block_numbers = self.block_table.np.ravel()[dcp_block_table_indices]
+            # Use virtual_block_size for mask calculation, which marks local
+            # tokens.
+            virtual_block_offsets = dcp_positions % virtual_block_size
+            self.current_rank = self.dcp_world_size * self.pcp_rank + self.dcp_rank
+            mask = (virtual_block_offsets // self.cp_kv_cache_interleave_size %
+                    (self.dcp_world_size *
+                        self.pcp_world_size) == self.current_rank)
+            # Calculate local block_offsets
+            block_offsets = virtual_block_offsets \
+                // (self.dcp_world_size * self.pcp_world_size * self.cp_kv_cache_interleave_size) \
+                * self.cp_kv_cache_interleave_size + virtual_block_offsets % self.cp_kv_cache_interleave_size
+            # Calculate slot_mapping
+            slot_mapping = block_numbers * self.block_size + block_offsets
+            # Write final slots, use -1 for not-local
+            self.slot_mapping.np[:dcp_req_indices.shape[0]] = np.where(
+                mask, slot_mapping, -1)
+        # else:
+        #     assert self.kernel_sizes is not None
+        if len(normal_req_indices):
+            if self.block_size == self.kernel_sizes[0]:
+                # IMPORTANT: In hybrid mode, positions are in logical block space,
+                # but we need to map them to the correct logical block table indices
+                logical_block_idx = normal_positions // self.block_size
+                # Account for the expanded logical table
+                # (always needed with unified tensor)
+                # Each physical block is split into multiple logical blocks
+                # The logical table has been expanded to accommodate this
+                normal_block_table_indices = (
+                    normal_req_indices * self.max_num_blocks_per_req *
+                    self.blocks_per_phys_block + logical_block_idx)
+                block_numbers = self.block_table.np.ravel(
+                )[normal_block_table_indices]
+                block_offsets = normal_positions % self.block_size
+                np.add(block_numbers * self.block_size,
+                        block_offsets,
+                        out=self.slot_mapping.np[dcp_req_indices.shape[0]:normal_req_indices.shape[0]])
 
     def commit_block_table(self, num_reqs: int) -> None:
         self.block_table.copy_to_gpu(num_reqs)
@@ -325,6 +399,14 @@ class MultiGroupBlockTable:
     ) -> None:
         for block_table in self.block_tables:
             block_table.compute_slot_mapping(req_indices, positions)
+
+    def dycp_compute_slot_mapping(self, dcp_req_indices: np.ndarray, normal_req_indices: np.ndarray, 
+                             dcp_positions: np.ndarray, normal_positions: np.ndarray,
+                             num_dcp_req: int) -> None:
+        for block_table in self.block_tables:
+            block_table.dycp_compute_slot_mapping(dcp_req_indices, normal_req_indices, 
+                             dcp_positions, normal_positions,
+                             num_dcp_req)
 
     def commit_block_table(self, num_reqs: int) -> None:
         for block_table in self.block_tables:

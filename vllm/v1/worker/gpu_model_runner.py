@@ -317,6 +317,15 @@ class GPUModelRunner(
         self.calculate_kv_scales = self.cache_config.calculate_kv_scales
         self.dcp_world_size = self.parallel_config.decode_context_parallel_size
         self.dcp_rank = 0 if self.dcp_world_size <= 1 else get_dcp_group().rank_in_group
+        try:
+            from vllm.distributed.parallel_state import get_dycp_group
+
+            self.dycp_world_size = get_dycp_group().world_size
+            self.dycp_rank = get_dycp_group().rank_in_group
+        except AssertionError:
+            # DCP might not be initialized in testing
+            self.dycp_world_size = 1
+            self.dycp_rank = 0
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
 
@@ -494,6 +503,10 @@ class GPUModelRunner(
         self.encoder_seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         if self.dcp_world_size > 1:
             self.dcp_local_seq_lens = self._make_buffer(
+                self.max_num_reqs, dtype=torch.int32
+            )
+        if self.dycp_world_size > 1:
+            self.dycp_local_seq_lens = self._make_buffer(
                 self.max_num_reqs, dtype=torch.int32
             )
         # Because inputs_embeds may be bfloat16 and we don't need a numpy
@@ -1343,6 +1356,47 @@ class GPUModelRunner(
         # arange: [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         cu_num_tokens, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
 
+        req_ids = self.input_batch.req_ids
+        dcp_req_ids = req_ids[:scheduler_output.num_cp_request]
+        normal_req_ids = req_ids[scheduler_output.num_cp_request:]
+        num_dcp_tokens = scheduler_output.cp_rank_scheduled_tokens
+        num_dcp_req = scheduler_output.num_cp_request
+        tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
+        dcp_tokens = tokens[:num_dcp_req]
+        normal_tokens = tokens[num_dcp_req:]
+
+        dcp_num_scheduled_tokens = np.array(dcp_tokens, dtype=np.int32)
+        normal_num_scheduled_tokens = np.array(normal_tokens, dtype=np.int32)
+        # 创建请求ID到索引的映射
+        req_id_to_index = {req_id: idx for idx, req_id in enumerate(req_ids)}
+        
+        # 获取DCP请求和正常请求的索引
+        dcp_indices = [req_id_to_index[req_id] for req_id in dcp_req_ids]
+        normal_indices = [req_id_to_index[req_id] for req_id in normal_req_ids]
+
+        if len(dcp_indices) > 0:
+            dycp_req_indices = np.repeat(self.arange_np[:num_dcp_req],
+                                    dcp_num_scheduled_tokens)
+        else:
+            dycp_req_indices = np.array([], dtype=np.int64)
+            
+        if len(normal_indices) > 0:
+            normal_req_indices = np.repeat(self.arange_np[num_dcp_req:num_reqs],
+                                       normal_num_scheduled_tokens)
+        else:
+            normal_req_indices = np.array([], dtype=np.int64)
+        
+        _, dcp_arange = self._get_cumsum_and_arange(dcp_num_scheduled_tokens)
+        _, normal_arange = self._get_cumsum_and_arange(normal_num_scheduled_tokens)
+        dycp_positions_np = np.add(
+            self.input_batch.num_computed_tokens_cpu[dycp_req_indices],
+            dcp_arange,
+        )
+        normal_positions_np = np.add(
+            self.input_batch.num_computed_tokens_cpu[normal_req_indices],
+            normal_arange,
+        )
+
         # Get positions.
         positions_np = self.positions.np[:total_num_scheduled_tokens]
         np.add(
@@ -1350,7 +1404,7 @@ class GPUModelRunner(
             arange,
             out=positions_np,
         )
-
+        
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -1425,8 +1479,10 @@ class GPUModelRunner(
                     ].copy_(req_embeds[start_pos:actual_end])
 
                 output_idx += num_sched
-
-        self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
+        if self.dycp_world_size > 1:
+            self.input_batch.block_table.dycp_compute_slot_mapping(dycp_req_indices, dycp_positions_np, normal_req_indices, normal_positions_np, scheduler_output.num_cp_request)
+        else:
+            self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
         self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens)
 
         # Prepare the attention metadata.
@@ -1640,7 +1696,21 @@ class GPUModelRunner(
             cm_base.dcp_local_seq_lens_cpu = self.dcp_local_seq_lens.cpu[
                 :num_reqs_padded
             ]
+        if self.dycp_world_size > 1:
+            self.dycp_local_seq_lens.cpu[:num_reqs] = get_dcp_local_seq_lens(
+                self.seq_lens.cpu[:num_reqs],
+                self.dycp_world_size,
+                self.dycp_rank,
+                self.parallel_config.cp_kv_cache_interleave_size,
+            )
+            self.dycp_local_seq_lens.cpu[num_dycp_reqs:num_reqs].copy_(self.seq_lens.cpu[num_dycp_reqs:num_reqs])
+            self.dycp_local_seq_lens.cpu[num_reqs:].fill_(0)
+            self.dycp_local_seq_lens.copy_to_gpu(num_reqs_padded)
 
+            cm_base.dycp_local_seq_lens = self.dycp_local_seq_lens.gpu[:num_reqs_padded]
+            cm_base.dycp_local_seq_lens_cpu = self.dycp_local_seq_lens.cpu[
+                :num_reqs_padded
+            ]
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
             cm_base.num_logits_indices = logits_indices.size(0)
             cm_base.logits_indices_padded = self._prepare_kv_sharing_fast_prefill(

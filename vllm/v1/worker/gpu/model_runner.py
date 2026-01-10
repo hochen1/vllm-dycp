@@ -224,7 +224,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Attention groups are not supported.
         self.attn_groups = []  # type: ignore
 
-    def prepare_dummy_attn_metadata(self, input_batch: InputBatch) -> None:
+    def prepare_dummy_attn_metadata(self, num_dycp_reqs: int, input_batch: InputBatch) -> None:
         block_tables = self.block_tables.get_dummy_block_tables(input_batch.num_reqs)
         slot_mappings = self.block_tables.get_dummy_slot_mappings(
             input_batch.num_tokens
@@ -247,6 +247,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
+            num_dycp_reqs=num_dycp_reqs,
         )
         input_batch.attn_metadata = attn_metadata
 
@@ -256,6 +257,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_tokens: int,
         *args,
         skip_attn: bool = True,
+        num_dycp_reqs: int = 0,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         num_reqs = min(num_tokens, self.max_num_reqs)
@@ -266,7 +268,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             device=self.device,
         )
         if not skip_attn:
-            self.prepare_dummy_attn_metadata(input_batch)
+            self.prepare_dummy_attn_metadata(num_dycp_reqs, input_batch)
 
         num_tokens_across_dp = make_num_tokens_across_dp(self.dp_size, num_tokens)
         num_sampled_tokens = np.ones(input_batch.num_reqs, dtype=np.int32)
@@ -304,7 +306,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.sampler(logits, sampling_metadata)
 
     @torch.inference_mode()
-    def profile_run(self) -> None:
+    def profile_run(self, scheduler_output: SchedulerOutput) -> None:
         hidden_states, sample_hidden_states = self._dummy_run(
             self.max_num_tokens,
             skip_attn=True,
@@ -570,6 +572,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
+            num_dycp_reqs=scheduler_output.num_cp_request,
         )
 
         input_ids = self.input_buffers.input_ids[:num_tokens_after_padding]
@@ -917,7 +920,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     input_buffers=self.input_buffers,
                     device=self.device,
                 )
-                self.prepare_dummy_attn_metadata(input_batch)
+                self.prepare_dummy_attn_metadata(scheduler_output.num_cp_request, input_batch)
                 sampling_metadata = None
 
         # Run model.

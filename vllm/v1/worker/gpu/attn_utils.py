@@ -152,6 +152,7 @@ def build_attn_metadata(
     block_tables: Sequence[torch.Tensor],
     slot_mappings: torch.Tensor,
     kv_cache_config: KVCacheConfig,
+    num_dycp_reqs: int,
 ) -> dict[str, Any]:
     max_query_len = int(query_start_loc_cpu.max())
     seq_lens = seq_lens[:num_reqs]
@@ -177,6 +178,7 @@ def build_attn_metadata(
             block_table_tensor=block_table,
             slot_mapping=slot_mapping,
             causal=True,
+            num_dycp_reqs=num_dycp_reqs,
         )
 
         attn_metadata_builder = attn_metadata_builders[i]
