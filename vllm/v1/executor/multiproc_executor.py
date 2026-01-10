@@ -38,6 +38,7 @@ from vllm.distributed.parallel_state import (
     get_pcp_group,
     get_pp_group,
     get_tp_group,
+    get_dycp_group,
 )
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
@@ -1016,6 +1017,8 @@ class WorkerProc:
         tp_rank = get_tp_group().rank_in_group
         dcp_size = get_dcp_group().world_size
         dcp_rank = get_dcp_group().rank_in_group
+        dycp_size = get_dycp_group().world_size
+        dycp_rank = get_dycp_group().rank_in_group
         process_name = "Worker"
         if dp_size > 1:
             process_name += f"_DP{dp_rank}"

@@ -1089,7 +1089,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 seq_lens = dcp_local_seq_lens
             
             if self.dycp_world_size > 1:
-                dycp_tot_seq_lens_device = seq_lens[:num_dycp_reqs]
+                # dycp_tot_seq_lens_device = seq_lens[:num_dycp_reqs]
                 seq_lens_cpu = dycp_local_seq_lens_cpu
                 seq_lens = dycp_local_seq_lens
 
@@ -2241,7 +2241,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     attn_out,
                     lse,
                     get_dycp_group(),
-                    scheduler_output.num_dcyp_reqs,
+                    attn_metadata.num_dcyp_reqs,
                 )
                 self._v_up_proj_dycp(attn_out, out=output[:num_decode_tokens])
                 return output_padded

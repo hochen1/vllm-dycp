@@ -1605,6 +1605,7 @@ class GPUModelRunner(
         for_cudagraph_capture: bool = False,
         num_scheduled_tokens: dict[str, int] | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
+        num_dycp_reqs: int = 0,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
@@ -3139,6 +3140,7 @@ class GPUModelRunner(
                         use_spec_decode=use_spec_decode,
                         num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                         cascade_attn_prefix_lens=cascade_attn_prefix_lens,
+                        num_dycp_reqs=scheduler_output.num_cp_request
                     )
                 )
 
