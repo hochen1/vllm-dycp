@@ -560,6 +560,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         seq_lens_np = np.full(num_reqs, self.max_model_len, dtype=np.int32)
 
         # Layer name -> attention metadata.
+        logger.info(f"chenxiao--debug scheduler_output.num_cp_reques:{scheduler_output.num_cp_request}")
         attn_metadata = build_attn_metadata(
             attn_metadata_builders=self.attn_metadata_builders,
             num_reqs=num_reqs,

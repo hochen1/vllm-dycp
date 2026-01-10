@@ -211,57 +211,51 @@ class BlockTable:
         # Use a "virtual block" which equals to world_size * block_size
         # for block_table_indices calculation.
         if len(dcp_req_indices):
-            virtual_block_size = self.block_size * self.dcp_world_size * self.pcp_world_size
-            # IMPORTANT: In hybrid mode, positions are in logical block space,
-            # but we need to map them to the correct logical block table indices
-            # logical_block_idx = positions // virtual_block_size
-            logical_block_idx = dcp_positions // virtual_block_size
-            # Account for the expanded logical table
-            # (always needed with unified tensor)
-            # Each physical block is split into multiple logical blocks
-            # The logical table has been expanded to accommodate this
-            dcp_block_table_indices = (dcp_req_indices * self.max_num_blocks_per_req *
-                                    self.blocks_per_phys_block +
-                                    logical_block_idx)
-            if not np.issubdtype(dcp_block_table_indices.dtype, np.integer):
-                dcp_block_table_indices = dcp_block_table_indices.astype(np.int64)
-            block_numbers = self.block_table.np.ravel()[dcp_block_table_indices]
+            # Note(hc): The DCP implement store kvcache with an interleave
+            # style, the kvcache for the token whose token_idx is i is
+            # always stored on the GPU whose dcp_rank equals i % cp_world_size:
+
+            # Use a "virtual block" which equals to world_size * block_size
+            # for block_table_indices calculation.
+            virtual_block_size = self.block_size * self.dycp_world_size
+            block_table_indices = (
+                dcp_req_indices * self.max_num_blocks_per_req
+                + dcp_positions // virtual_block_size
+            )
+
+            block_numbers = self.block_table.np.ravel()[block_table_indices]
             # Use virtual_block_size for mask calculation, which marks local
             # tokens.
             virtual_block_offsets = dcp_positions % virtual_block_size
-            self.current_rank = self.dcp_world_size * self.pcp_rank + self.dcp_rank
-            mask = (virtual_block_offsets // self.cp_kv_cache_interleave_size %
-                    (self.dcp_world_size *
-                        self.pcp_world_size) == self.current_rank)
+            mask = (
+                virtual_block_offsets
+                // self.cp_kv_cache_interleave_size
+                % self.dcp_world_size
+                == self.dcp_rank
+            )
             # Calculate local block_offsets
-            block_offsets = virtual_block_offsets \
-                // (self.dcp_world_size * self.pcp_world_size * self.cp_kv_cache_interleave_size) \
-                * self.cp_kv_cache_interleave_size + virtual_block_offsets % self.cp_kv_cache_interleave_size
+            block_offsets = (
+                virtual_block_offsets
+                // (self.dcp_world_size * self.cp_kv_cache_interleave_size)
+                * self.cp_kv_cache_interleave_size
+                + virtual_block_offsets % self.cp_kv_cache_interleave_size
+            )
             # Calculate slot_mapping
             slot_mapping = block_numbers * self.block_size + block_offsets
             # Write final slots, use -1 for not-local
             self.slot_mapping.np[:dcp_req_indices.shape[0]] = np.where(
-                mask, slot_mapping, -1)
-        # else:
-        #     assert self.kernel_sizes is not None
+                mask, slot_mapping, -1
+            )
         if len(normal_req_indices):
-            if self.block_size == self.kernel_sizes[0]:
-                # IMPORTANT: In hybrid mode, positions are in logical block space,
-                # but we need to map them to the correct logical block table indices
-                logical_block_idx = normal_positions // self.block_size
-                # Account for the expanded logical table
-                # (always needed with unified tensor)
-                # Each physical block is split into multiple logical blocks
-                # The logical table has been expanded to accommodate this
-                normal_block_table_indices = (
-                    normal_req_indices * self.max_num_blocks_per_req *
-                    self.blocks_per_phys_block + logical_block_idx)
-                block_numbers = self.block_table.np.ravel(
-                )[normal_block_table_indices]
-                block_offsets = normal_positions % self.block_size
-                np.add(block_numbers * self.block_size,
-                        block_offsets,
-                        out=self.slot_mapping.np[dcp_req_indices.shape[0]:normal_req_indices.shape[0]])
+            block_table_indices = (
+                normal_req_indices * self.max_num_blocks_per_req + normal_positions // self.block_size
+            )
+
+            block_numbers = self.block_table.np.ravel()[block_table_indices]
+            block_offsets = normal_positions % self.block_size
+            np.add(block_numbers * self.block_size,
+                    block_offsets,
+                    out=self.slot_mapping.np[dcp_req_indices.shape[0]:normal_req_indices.shape[0]])
 
     def commit_block_table(self, num_reqs: int) -> None:
         self.block_table.copy_to_gpu(num_reqs)

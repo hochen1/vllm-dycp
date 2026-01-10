@@ -47,7 +47,7 @@ class CrossDPExampleConnector(ExampleConnector):
         )
         
         self._cross_requests_need_load: list[dict[str, Request]] = [
-            {} for _ in range(vllm_config.parallel_config.decode_context_parallel_size)
+            {} for _ in range(vllm_config.parallel_config.dp_per_domain)
         ]
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
@@ -88,8 +88,8 @@ class CrossDPExampleConnector(ExampleConnector):
         such that we load the KVs in the next forward pass.
         """
         if num_external_tokens > 0:
-            for dcp_rank in request.dcp_ranks:
-                self._cross_requests_need_load[dcp_rank][request.request_id] = request
+            for cp_rank in request.cp_ranks:
+                self._cross_requests_need_load[cp_rank][request.request_id] = request
     
     def build_connector_meta(
         self,

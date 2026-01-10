@@ -413,6 +413,7 @@ class MLACommonMetadata(Generic[D]):
     num_decodes: int
     num_decode_tokens: int
     num_prefills: int
+    num_dycp_reqs: int = 0
 
     # The dimension of the attention heads
     head_dim: int | None = None
@@ -773,6 +774,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         num_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
         max_seq_len = common_attn_metadata.max_seq_len
+        logger.info(f"chenxiao--debug common_attn_metadata.num_dycp_reqs:{common_attn_metadata.num_dycp_reqs}")
+        num_dycp_reqs = common_attn_metadata.num_dycp_reqs
 
         # Note(simon): be careful about the CPU <> GPU memory movement in this
         # function. We should avoid GPU -> CPU sync as much as possible because
@@ -1118,6 +1121,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             num_prefills=num_prefills,
             prefill=prefill_metadata,
             decode=decode_metadata,
+            num_dycp_reqs=num_dycp_reqs,
         )
 
         if self._use_fi_prefill and num_prefills > 0:
@@ -2241,7 +2245,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     attn_out,
                     lse,
                     get_dycp_group(),
-                    attn_metadata.num_dcyp_reqs,
+                    attn_metadata.num_dycp_reqs,
                 )
                 self._v_up_proj_dycp(attn_out, out=output[:num_decode_tokens])
                 return output_padded

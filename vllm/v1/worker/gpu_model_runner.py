@@ -1480,7 +1480,7 @@ class GPUModelRunner(
 
                 output_idx += num_sched
         if self.dycp_world_size > 1:
-            self.input_batch.block_table.dycp_compute_slot_mapping(dycp_req_indices, dycp_positions_np, normal_req_indices, normal_positions_np, scheduler_output.num_cp_request)
+            self.input_batch.block_table.dycp_compute_slot_mapping(dycp_req_indices, normal_req_indices, dycp_positions_np, normal_positions_np, scheduler_output.num_cp_request)
         else:
             self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
         self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens)
@@ -1681,6 +1681,7 @@ class GPUModelRunner(
             block_table_tensor=block_table_gid_0,
             slot_mapping=slot_mapping_gid_0,
             causal=True,
+            num_dycp_reqs=num_dycp_reqs,
         )
 
         if self.dcp_world_size > 1:

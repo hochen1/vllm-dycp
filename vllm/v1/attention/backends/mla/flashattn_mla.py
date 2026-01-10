@@ -313,7 +313,10 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
         # kernel uses this to calculate grid dimensions. Ensure it's at least 1
         # to prevent invalid grid configuration during graph capture.
         max_seqlen_q = max(attn_metadata.decode.max_query_len, 1)
-
+        if attn_metadata.num_dycp_reqs > 0:
+            self.need_to_return_lse_for_decode = True
+        logger.info(f"chenxiao--debug attn_metadata.decode.block_table:{attn_metadata.decode.block_table}")
+        logger.info(f"chenxiao--debug attn_metadata.decode.seq_lens:{attn_metadata.decode.seq_lens}")
         attn_out = flash_attn_varlen_func(
             q=q_pe,
             k=k_pe_cache.unsqueeze(-2),  # Add head dim of 1

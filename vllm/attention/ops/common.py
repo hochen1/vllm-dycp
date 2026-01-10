@@ -4,7 +4,7 @@ import torch
 
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.triton_utils import tl, triton
-
+from vllm.logger import logger
 
 @triton.jit
 def _correct_attn_cp_out_kernel(
@@ -243,7 +243,13 @@ def dycp_lse_ag_out_rs(
     cp_group: GroupCoordinator,
     num_dycp_reqs: int,
 ):  
+    logger.info(f"chenxiao--debug num_dycp_reqs:{num_dycp_reqs}")
+    if cp_attn_lse is None:
+        return cp_attn_out
     lse_exp = torch.exp(cp_attn_lse)[:num_dycp_reqs]
+    lse_exp = lse_exp.unsqueeze(-1)
+    logger.info(f"chenxiao--debug lse_exp:{lse_exp.shape}")
+    logger.info(f"chenxiao--debug cp_attn_out:{cp_attn_out.shape}")
     weighted_output = cp_attn_out[:num_dycp_reqs] * lse_exp
     target_shape = weighted_output.view(lse_exp.shape[0], -1).shape
     packed_out = torch.cat([
@@ -258,7 +264,7 @@ def dycp_lse_ag_out_rs(
     global_output = weighted_output / lse_exp
     cp_attn_out[:num_dycp_reqs].copy_(global_output)
 
-    return cp_attn_out, global_lse_sum
+    return cp_attn_out
 
 
 def cp_lse_ag_out_ar(
