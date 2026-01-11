@@ -496,6 +496,12 @@ class GPUModelRunner(
             self.dcp_local_seq_lens = self._make_buffer(
                 self.max_num_reqs, dtype=torch.int32
             )
+
+        if self.cp_world_size > 1:
+            self.dycp_local_seq_lens = self._make_buffer(
+            self.max_num_reqs, dtype=torch.int32
+        )
+
         # Because inputs_embeds may be bfloat16 and we don't need a numpy
         # version of this tensor, avoid a RuntimeError by not creating a
         # numpy buffer.
@@ -1426,7 +1432,11 @@ class GPUModelRunner(
 
                 output_idx += num_sched
 
-        self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
+        if self.cp_world_size > 1:
+            self.input_batch.block_table.compute_domain_slot_mapping(req_indices, positions_np, scheduler_output.num_cp_request)
+        else:
+            self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
+        
         self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens)
 
         # Prepare the attention metadata.
@@ -1549,6 +1559,7 @@ class GPUModelRunner(
         for_cudagraph_capture: bool = False,
         num_scheduled_tokens: dict[str, int] | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
+        num_dycp_reqs: int = 0,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
@@ -1624,6 +1635,7 @@ class GPUModelRunner(
             block_table_tensor=block_table_gid_0,
             slot_mapping=slot_mapping_gid_0,
             causal=True,
+            num_dycp_reqs=num_dycp_reqs,
         )
 
         if self.dcp_world_size > 1:
@@ -1638,6 +1650,22 @@ class GPUModelRunner(
 
             cm_base.dcp_local_seq_lens = self.dcp_local_seq_lens.gpu[:num_reqs_padded]
             cm_base.dcp_local_seq_lens_cpu = self.dcp_local_seq_lens.cpu[
+                :num_reqs_padded
+            ]
+
+        if self.cp_world_size > 1:
+            self.dycp_local_seq_lens.cpu[:num_dycp_reqs] = get_dcp_local_seq_lens(
+                self.seq_lens.cpu[:num_dycp_reqs],
+                self.cp_world_size,
+                self.cp_rank,
+                self.parallel_config.cp_kv_cache_interleave_size,
+            )
+            self.dycp_local_seq_lens.cpu[num_dycp_reqs:num_reqs].copy_(self.seq_lens.cpu[num_dycp_reqs:num_reqs])
+            self.dycp_local_seq_lens.cpu[num_reqs:].fill_(0)
+            self.dycp_local_seq_lens.copy_to_gpu(num_reqs_padded)
+
+            cm_base.dycp_local_seq_lens = self.dycp_local_seq_lens.gpu[:num_reqs_padded]
+            cm_base.dycp_local_seq_lens_cpu = self.dycp_local_seq_lens.cpu[
                 :num_reqs_padded
             ]
 
@@ -4149,6 +4177,7 @@ class GPUModelRunner(
                 max_query_len=max_query_len,
                 ubatch_slices=ubatch_slices_padded if pad_attn else ubatch_slices,
                 for_cudagraph_capture=is_graph_capturing,
+                num_dycp_reqs=num_cp_tokens,
             )
 
         with self.maybe_dummy_run_with_lora(

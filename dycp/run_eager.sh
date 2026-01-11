@@ -11,7 +11,7 @@ export COMMON_ARGS="
 "
 export VLLM_VERSION=0.13.0
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=380
-export VLLM_ATTENTION_BACKEND=FLASH_ATTN_MLA
+# export VLLM_ATTENTION_BACKEND=FLASH_ATTN_MLA
 
 ulimit -n 65536
 vllm serve ${MODEL_PATH} \
@@ -27,7 +27,7 @@ vllm serve ${MODEL_PATH} \
     --dp-per-domain 4 \
     --block-size 64 \
     --cp-kv-cache-interleave-size 64 \
-    --no-enforce-eager \
+    --enforce-eager \
     --max-num-seqs 6 \
     --enable-expert-parallel \
     --compilation-config '{"cudagraph_capture_sizes":[6], "cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes_for_cp": 2}' \

@@ -93,7 +93,7 @@ class CrossDPScheduler(Scheduler):
             hash_block_size=self.block_size,
             metrics_collector=self.kv_metrics_collector,
         )
-
+        self.max_cp_tokens = self.vllm_config.compilation_config.max_cudagraph_capture_size
         self.req_count = 0
 
     def _update_after_schedule(
@@ -584,7 +584,9 @@ class CrossDPScheduler(Scheduler):
         # Next, schedule the WAITING requests.
         if not any(preempted_reqs):
             while self.waiting and token_budget > 0:
-                if len(self.running) == self.max_num_running_reqs * self.cp_world_size:
+                if len(self.running) == (
+                    (self.max_num_running_reqs - self.max_cp_tokens) * self.cp_world_size + self.max_cp_tokens
+                ):
                     break
                 request = self.waiting.peek_request()
                 if len(request.cp_ranks) == 0:
@@ -808,7 +810,9 @@ class CrossDPScheduler(Scheduler):
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
 
         assert token_budget >= 0
-        assert len(self.running) <= self.max_num_running_reqs
+        assert len(self.running) <= (
+            (self.max_num_running_reqs - self.max_cp_tokens) * self.cp_world_size + self.max_cp_tokens
+        )
         # Since some requests in the RUNNING queue may not be scheduled in
         # this step, the total number of scheduled requests can be smaller than
         # len(self.running).

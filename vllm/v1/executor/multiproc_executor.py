@@ -31,6 +31,7 @@ from vllm.distributed import destroy_distributed_environment, destroy_model_para
 from vllm.distributed.device_communicators.shm_broadcast import Handle, MessageQueue
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.parallel_state import (
+    get_dycp_group,
     get_dcp_group,
     get_dp_group,
     get_ep_group,
@@ -1006,6 +1007,8 @@ class WorkerProc:
 
     @staticmethod
     def setup_proc_title_and_log_prefix(enable_ep: bool) -> None:
+        domain_size = get_dycp_group().world_size
+        domain_rank = get_dycp_group().rank_in_group
         dp_size = get_dp_group().world_size
         dp_rank = get_dp_group().rank_in_group
         pp_size = get_pp_group().world_size
@@ -1017,6 +1020,8 @@ class WorkerProc:
         dcp_size = get_dcp_group().world_size
         dcp_rank = get_dcp_group().rank_in_group
         process_name = "Worker"
+        if domain_size > 1:
+            process_name += f"_DOMAIN{domain_rank}"
         if dp_size > 1:
             process_name += f"_DP{dp_rank}"
         if pp_size > 1:
