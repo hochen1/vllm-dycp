@@ -587,7 +587,7 @@ class Worker(WorkerBase):
             scheduler_output = scheduler_outputs[self.model_runner.cp_rank]
 
             if scheduler_output is None:
-                logger.info(f"{self.model_runner.cp_rank} execute dummy run !")
+                logger.debug(f"{self.model_runner.cp_rank} execute dummy run !")
                 self.model_runner._dummy_run(1, force_attention=True, uniform_decode=True)
                 return False
             elif scheduler_output is False:

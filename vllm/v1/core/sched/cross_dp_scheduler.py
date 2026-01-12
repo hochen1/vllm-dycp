@@ -522,7 +522,7 @@ class CrossDPScheduler(Scheduler):
                         num_new_tokens,
                         num_lookahead_tokens=self.num_lookahead_tokens,
                     )
-                    logger.info(f"new_blocks: {new_blocks}, request.cp_ranks: {request.cp_ranks}, num_new_tokens: {num_new_tokens}")
+                    logger.debug(f"new_blocks: {new_blocks}, request.cp_ranks: {request.cp_ranks}, num_new_tokens: {num_new_tokens}")
                     if new_blocks is not None:
                         # The request can be scheduled.
                         break
@@ -572,7 +572,7 @@ class CrossDPScheduler(Scheduler):
                 if len(request.cp_ranks) != 1:
                     cp_rank_scheduled_tokens[rank][request.request_id] = len(request.cp_ranks)
             
-            logger.info(f"req_id={request.request_id}, num_scheduled_tokens={num_scheduled_tokens}, ranks: {request.cp_ranks}")
+            logger.debug(f"req_id={request.request_id}, num_scheduled_tokens={num_scheduled_tokens}, ranks: {request.cp_ranks}")
 
             token_budget -= num_new_tokens
             req_index += 1
@@ -597,7 +597,7 @@ class CrossDPScheduler(Scheduler):
                     else:
                         request.cp_ranks = [self.req_count % self.cp_world_size]
                         self.req_count += 1
-                        logger.info(f"scheduling request= {request.request_id} to rank {request.cp_ranks}")
+                        logger.debug(f"scheduling request= {request.request_id} to rank {request.cp_ranks}")
             
                 # KVTransfer: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
@@ -726,7 +726,7 @@ class CrossDPScheduler(Scheduler):
                     delay_cache_blocks=load_kv_async,
                     num_encoder_tokens=num_encoder_tokens,
                 )
-                logger.info(f"new_blocks --2: {new_blocks}, request.cp_ranks: {request.cp_ranks}, num_new_tokens: {num_new_tokens}")
+                logger.debug(f"new_blocks -- 2: {new_blocks}, request.cp_ranks: {request.cp_ranks}, num_new_tokens: {num_new_tokens}")
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     break

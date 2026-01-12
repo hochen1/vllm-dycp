@@ -458,6 +458,8 @@ class DomainMultiprocExecutor(MultiprocExecutor):
         pp_size = self.parallel_config.pipeline_parallel_size
         dp_per_domain = self.parallel_config.dp_per_domain
 
+        self.output_ranks: list[int] = [i * tp_size * pp_size for i in range(dp_per_domain)]
+
         # Set multiprocessing envs
         set_multiprocessing_worker_envs()
 
@@ -635,6 +637,9 @@ class DomainMultiprocExecutor(MultiprocExecutor):
                         " stack trace above for the root cause"
                     )
                 responses.append(result)
+            
+            if method in ("execute_model", "sample_tokens"):
+                return [responses[idx] for idx in self.output_ranks]
             return responses[0] if output_rank is not None else responses
 
         if non_block:

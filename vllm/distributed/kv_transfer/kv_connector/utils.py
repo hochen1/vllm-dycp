@@ -240,7 +240,7 @@ class KVOutputAggregator:
 
         for output in outputs:
             # assert output is not None
-            if not isinstance(model_runner_output, ModelRunnerOutput):
+            if not isinstance(output, ModelRunnerOutput):
                 continue
             output.kv_connector_output = KVConnectorOutput(
                 finished_sending=finished_sending or None,

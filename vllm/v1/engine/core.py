@@ -907,7 +907,7 @@ class EngineCoreProc(EngineCore):
                 if isinstance(scheduler_outputs, list):
                     # grammar_output = None
                     grammar_output = [None if mo is None else True for mo in execute_outputs]
-                    logger.info(f"sample_tokens_v1 input:  grammar_output={grammar_output}")
+                    logger.debug(f"sample_tokens_v1 input:  grammar_output={grammar_output}")
                 sample_outputs = self.model_executor.sample_tokens(grammar_output)
                 """
                     [false, model_runner_output, false, false]
