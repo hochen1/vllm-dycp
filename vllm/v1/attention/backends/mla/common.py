@@ -2127,7 +2127,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     get_dcp_group(),
                     is_lse_base_on_e=not getattr(self, "_use_fi_prefill", False),
                 )
-            if self.dycp_world_size > 1 and attn_metadata.num_dycp_reqs > 0:
+            if attn_metadata.num_dycp_reqs > 0:
                 # attn_out = dycp_lse_out_ar(
                 #     attn_out,
                 #     lse,

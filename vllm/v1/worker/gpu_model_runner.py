@@ -3097,6 +3097,7 @@ class GPUModelRunner(
                         use_spec_decode=use_spec_decode,
                         num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                         cascade_attn_prefix_lens=cascade_attn_prefix_lens,
+                        num_dycp_reqs=scheduler_output.num_cp_request,
                     )
                 )
 

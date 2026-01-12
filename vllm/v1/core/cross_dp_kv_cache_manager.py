@@ -92,24 +92,54 @@ class CrossDPKVCacheCoordinatorNoPrefixCache:
     def _avg_distribute_tokens_to_ranks(
         self,
         world_size: int,
-        num_tokens: int) -> list[int]:
-
-        total_blocks_required = cdiv(num_tokens, self.block_size)
-        remain_tokens = num_tokens % self.block_size
-
-        quota = total_blocks_required // world_size
-        remainder = total_blocks_required % world_size
-
-        results = []
-        for idx in range(world_size):
-            local_blocks = quota + (1 if idx < remainder else 0)
-            if remainder - 1 == idx:
-                local_tokens = (local_blocks - 1) * self.block_size + remain_tokens
-            else:
-                local_tokens = local_blocks * self.block_size
-            results.append(local_tokens)
+        seq_len: int,
+        cp_kv_cache_interleave_size: int = 1,
+    ) -> list[list[int]]:
+        """Calculate local seq_lens for all DCP ranks given a list of sequence lengths.
         
-        return results
+        While using dcp, kv_cache size stored on each rank may be different.
+        This function calculates the split decode seq_lens for all dcp ranks.
+        
+        Args:
+            seq_len: sequence lengths of the request
+            dcp_size: Number of DCP ranks
+            cp_kv_cache_interleave_size: Interleave size for KV cache
+            
+        Returns:
+            List of lists, where each inner list contains the local seq_len for 
+            all requests on that rank.
+            Format: [[rank0_req0, rank0_req1, ...], [rank1_req0, rank1_req1, ...], ...]
+        """
+        cp_kv_cache_interleave_size = self.block_size
+        # Initialize result: list of lists for each rank
+        result = []
+        
+        # Process each request
+        # for req_idx, seq_len in enumerate(seq_lens):
+        # Calculate base: the part that's evenly distributed
+        base = (
+            (seq_len // cp_kv_cache_interleave_size // world_size)
+            * cp_kv_cache_interleave_size
+        )
+        
+        # Calculate remainder: the part that needs to be distributed
+        remainder = seq_len - base * world_size
+        
+        # Distribute remainder across ranks
+        for rank in range(world_size):
+            rank_offset = rank * cp_kv_cache_interleave_size
+            # Calculate how much of the remainder this rank gets
+            # Clip to [0, cp_kv_cache_interleave_size]
+            rank_remainder = max(
+                0,
+                min(
+                    cp_kv_cache_interleave_size,
+                    remainder - rank_offset
+                )
+            )
+            local_seq_len = base + rank_remainder
+            result.append(local_seq_len)
+        return result
 
     def _allocate_blocks_to_cp_ranks(
         self,

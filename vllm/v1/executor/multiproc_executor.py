@@ -310,14 +310,9 @@ class MultiprocExecutor(Executor):
 
         if kv_output_aggregator is not None:
             output_rank = None
-            if method in ("execute_model", "sample_tokens"):
-                aggregate: Callable[[Any], Any] = partial(
-                    kv_output_aggregator.aggregate_domain, output_rank=unique_reply_rank or 0
-                )
-            else:
-                aggregate: Callable[[Any], Any] = partial(
-                    kv_output_aggregator.aggregate, output_rank=unique_reply_rank or 0
-                )
+            aggregate: Callable[[Any], Any] = partial(
+                kv_output_aggregator.aggregate, output_rank=unique_reply_rank or 0
+            )
         else:
             output_rank = unique_reply_rank
             aggregate = lambda x: x
@@ -575,6 +570,85 @@ class DomainMultiprocExecutor(MultiprocExecutor):
 
         self.output_rank = self._get_output_rank()
 
+    def collective_rpc(  # type: ignore[override]
+        self,
+        method: str | Callable,
+        timeout: float | None = None,
+        args: tuple = (),
+        kwargs: dict | None = None,
+        non_block: bool = False,
+        unique_reply_rank: int | None = None,
+        kv_output_aggregator: KVOutputAggregator | None = None,
+    ) -> Any:
+        """Returns single result if unique_reply_rank and/or kv_output_aggregator
+        is provided, otherwise list."""
+        assert self.rpc_broadcast_mq is not None, (
+            "collective_rpc should not be called on follower node"
+        )
+        if self.is_failed:
+            raise RuntimeError("Executor failed.")
+
+        deadline = None if timeout is None else time.monotonic() + timeout
+        kwargs = kwargs or {}
+
+        if kv_output_aggregator is not None:
+            output_rank = None
+            if method in ("execute_model", "sample_tokens"):
+                aggregate: Callable[[Any], Any] = partial(
+                    kv_output_aggregator.aggregate_domain, output_rank=unique_reply_rank or 0
+                )
+            else:
+                aggregate: Callable[[Any], Any] = partial(
+                    kv_output_aggregator.aggregate, output_rank=unique_reply_rank or 0
+                )
+        else:
+            output_rank = unique_reply_rank
+            aggregate = lambda x: x
+
+        if isinstance(method, str):
+            send_method = method
+        else:
+            send_method = cloudpickle.dumps(method, protocol=pickle.HIGHEST_PROTOCOL)
+        self.rpc_broadcast_mq.enqueue((send_method, args, kwargs, output_rank))
+
+        response_mqs: Sequence[MessageQueue] = self.response_mqs
+        if output_rank is not None:
+            response_mqs = (response_mqs[output_rank],)
+
+        shutdown_event = self.shutdown_event
+
+        def get_response():
+            responses = []
+            for mq in response_mqs:
+                dequeue_timeout = (
+                    None if deadline is None else (deadline - time.monotonic())
+                )
+                try:
+                    status, result = mq.dequeue(
+                        timeout=dequeue_timeout, cancel=shutdown_event
+                    )
+                except TimeoutError as e:
+                    raise TimeoutError(f"RPC call to {method} timed out.") from e
+                if status != WorkerProc.ResponseStatus.SUCCESS:
+                    raise RuntimeError(
+                        f"Worker failed with error '{result}', please check the"
+                        " stack trace above for the root cause"
+                    )
+                responses.append(result)
+            return responses[0] if output_rank is not None else responses
+
+        if non_block:
+            future = FutureWrapper(self.futures_queue, aggregate=aggregate)
+            self.futures_queue.appendleft((future, get_response))
+            return future
+
+        # First drain any pending futures in the queue.
+        while self.futures_queue:
+            future, get_fut_response = self.futures_queue.pop()
+            future.wait_for_response(get_fut_response)
+
+        return aggregate(get_response())
+    
     def execute_model(  # type: ignore[override]
         self, scheduler_outputs: list[SchedulerOutput], non_block: bool = False
     ) -> Future[list[None]]:
@@ -1021,7 +1095,7 @@ class WorkerProc:
         dcp_rank = get_dcp_group().rank_in_group
         process_name = "Worker"
         if domain_size > 1:
-            process_name += f"_DOMAIN{domain_rank}"
+            process_name += f"_Domain{domain_rank}"
         if dp_size > 1:
             process_name += f"_DP{dp_rank}"
         if pp_size > 1:
