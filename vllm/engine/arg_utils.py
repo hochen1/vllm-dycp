@@ -575,6 +575,8 @@ class EngineArgs:
 
     # domain parallel config
     dp_per_domain: int = ParallelConfig.dp_per_domain
+    # num_cp_reqs: number of requests to be processed in a single iteration for cp.
+    num_cp_seqs: int = SchedulerConfig.num_cp_seqs
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -1106,6 +1108,10 @@ class EngineArgs:
             "--stream-interval", **scheduler_kwargs["stream_interval"]
         )
 
+        scheduler_group.add_argument(
+            "--num-cp-seqs", **scheduler_kwargs["num_cp_seqs"]
+        )
+
         # Compilation arguments
         compilation_kwargs = get_kwargs(CompilationConfig)
         compilation_group = parser.add_argument_group(
@@ -1620,6 +1626,7 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,
+            num_cp_seqs=self.num_cp_seqs,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:

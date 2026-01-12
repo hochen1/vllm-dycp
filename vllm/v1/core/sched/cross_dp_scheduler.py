@@ -93,8 +93,9 @@ class CrossDPScheduler(Scheduler):
             hash_block_size=self.block_size,
             metrics_collector=self.kv_metrics_collector,
         )
-        self.max_cp_tokens = self.vllm_config.compilation_config.max_cudagraph_capture_size
+        self.max_cp_tokens = self.vllm_config.scheduler_config.num_cp_seqs
         self.req_count = 0
+        self.cp_request_count = 0
 
     def _update_after_schedule(
         self,
@@ -132,6 +133,8 @@ class CrossDPScheduler(Scheduler):
 
     def _free_request(self, request: Request) -> dict[str, Any] | None:
         assert request.is_finished()
+
+        self.cp_request_count -= 1
 
         delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)
@@ -585,14 +588,17 @@ class CrossDPScheduler(Scheduler):
         if not any(preempted_reqs):
             while self.waiting and token_budget > 0:
                 if len(self.running) == (
-                    (self.max_num_running_reqs - self.max_cp_tokens) * self.cp_world_size + self.max_cp_tokens
+                    (self.max_num_running_reqs - self.cp_request_count) * self.cp_world_size + self.cp_request_count
                 ):
                     break
                 request = self.waiting.peek_request()
                 if len(request.cp_ranks) == 0:
                     if request.num_tokens > 1024 * 100:
                         print(f"It's a cp request, token num: {request.num_tokens}",flush=True)
+                        if self.cp_request_count >= self.max_cp_tokens:
+                            continue
                         request.cp_ranks = [idx for idx in range(self.cp_world_size)]
+                        self.cp_request_count += 1
                         logger.info(f"It's a cp request, token num: {request.num_tokens}")
                     else:
                         request.cp_ranks = [self.req_count % self.cp_world_size]
@@ -812,7 +818,7 @@ class CrossDPScheduler(Scheduler):
 
         assert token_budget >= 0
         assert len(self.running) <= (
-            (self.max_num_running_reqs - self.max_cp_tokens) * self.cp_world_size + self.max_cp_tokens
+            (self.max_num_running_reqs - self.cp_request_count) * self.cp_world_size + self.cp_request_count
         )
         # Since some requests in the RUNNING queue may not be scheduled in
         # this step, the total number of scheduled requests can be smaller than

@@ -10,8 +10,8 @@ mkdir -p ${RESULT_DIR}
 # Online - 4k/1.5k/3s/70ms
 export INPUT_LEN=4000
 export OUTPUT_LEN=1024
-export NUM_PROMPTS=200
-export MAX_CONCURRENCY=100
+export NUM_PROMPTS=50
+export MAX_CONCURRENCY=25
 export REQUEST_RATE=inf
 
 ulimit -n 65536

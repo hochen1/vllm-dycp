@@ -29,7 +29,7 @@ vllm serve ${MODEL_PATH} \
     --block-size 64 \
     --cp-kv-cache-interleave-size 64 \
     --enforce-eager \
-    --max-num-seqs 6 \
+    --max-num-seqs 48 \
     --enable-expert-parallel \
     --compilation-config '{"cudagraph_capture_sizes":[6], "cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes_for_cp": 2}' \
     --kv-transfer-config \
