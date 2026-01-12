@@ -10,7 +10,7 @@ import json
 
 # 1. 构造一条恰好 128 token 的 prompt
 #    这里用“单词 + 空格”简单凑数，实际可按需替换
-TOKEN_CNT = 128
+TOKEN_CNT = 50
 prompt = " ".join(["hello"] * TOKEN_CNT)        # 128 个 hello
 
 # 2. 请求参数
