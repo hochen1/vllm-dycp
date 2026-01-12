@@ -522,7 +522,7 @@ class CrossDPScheduler(Scheduler):
                         num_new_tokens,
                         num_lookahead_tokens=self.num_lookahead_tokens,
                     )
-
+                    logger.info(f"new_blocks: {new_blocks}, request.cp_ranks: {request.cp_ranks}, num_new_tokens: {num_new_tokens}")
                     if new_blocks is not None:
                         # The request can be scheduled.
                         break
@@ -591,6 +591,7 @@ class CrossDPScheduler(Scheduler):
                 request = self.waiting.peek_request()
                 if len(request.cp_ranks) == 0:
                     if request.num_tokens > 1024:
+                        print(f"It's a cp request, token num: {request.num_tokens}",flush=True)
                         request.cp_ranks = [idx for idx in range(self.cp_world_size)]
                         logger.info(f"It's a cp request, token num: {request.num_tokens}")
                     else:
@@ -725,7 +726,7 @@ class CrossDPScheduler(Scheduler):
                     delay_cache_blocks=load_kv_async,
                     num_encoder_tokens=num_encoder_tokens,
                 )
-
+                logger.info(f"new_blocks --2: {new_blocks}, request.cp_ranks: {request.cp_ranks}, num_new_tokens: {num_new_tokens}")
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     break

@@ -194,7 +194,7 @@ class SchedulerOutput:
     free_encoder_mm_hashes: list[str]
 
     # scheduled_tokens of each cp rank
-    cp_rank_scheduled_tokens: dict[str, int]
+    cp_rank_scheduled_tokens: dict[str, int] | None = None
 
     # Request IDs that are preempted in this step.
     # Only used for v2 model runner.
