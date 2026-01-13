@@ -34,8 +34,11 @@ def test_mla_flash_attn_distributed():
     kv_c_cache = torch.randn(num_blocks, block_size, 1, d_nope, dtype=dtype, device=device)
     
     cu_seqlens_q = torch.tensor([0, s_q], dtype=torch.int32, device=device)
+    print(f"cu_seqlens_q:{cu_seqlens_q}")
     seqused_k = torch.tensor([s_k], dtype=torch.int32, device=device)
+    print(f"seqused_k:{seqused_k}")
     block_table = torch.arange(num_blocks, dtype=torch.int32, device=device).view(b, -1)
+    print(f"block_table:{block_table}")
 
     out_ref, lse_ref = flash_attn_varlen_func(
         q=q_pe,
@@ -67,9 +70,9 @@ def test_mla_flash_attn_distributed():
         local_kv_c = kv_c_cache[start_b:end_b].clone().contiguous()
         
         local_block_table = torch.arange(blocks_per_rank, dtype=torch.int32, device=device).view(b, -1)
-        
+        print(f"local_block_table:{local_block_table}")
         local_seqused_k = torch.tensor([blocks_per_rank * block_size], dtype=torch.int32, device=device)
-
+        print(f"local_seqused_k:{local_seqused_k}")
         out_rank, lse_rank = flash_attn_varlen_func(
             q=q_pe,
             k=local_k_pe,
@@ -100,7 +103,7 @@ def test_mla_flash_attn_distributed():
     out_dist = (weighted_out_sum / (sum_exp + 1e-10)).to(dtype)
 
     cal_diff(out_ref, out_dist, "flash attn mla output")
-    
+
     print("MLA Distributed KV Cache Test Passed!")
 
 if __name__ == "__main__":

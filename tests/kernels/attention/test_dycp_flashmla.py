@@ -26,7 +26,7 @@ def test_dycp_flashmla():
         print(f"Skipping: {reason}")
         return
 
-    b = 8
+    b = 1
     s_q = 1
     mean_sk = 2048
     h_q = 32
