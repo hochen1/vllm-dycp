@@ -753,7 +753,6 @@ class GPUModelRunner(
             )
         
         if scheduler_output.num_cp_request > 0:
-            print("Traggier Reorder cp Batch", flush=True)
             reorder_batch_to_split_cp_and_normal(
                 self.input_batch,
                 scheduler_output
