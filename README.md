@@ -40,6 +40,7 @@ vllm serve ${MODEL_PATH} \
     --no-enforce-eager \
     --max-num-seqs 6 \
     --enable-expert-parallel \
+    --num-cp-seqs 2 \
     --compilation-config '{"cudagraph_capture_sizes":[6], "cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes_for_cp": 2}' \
     --kv-transfer-config \
     '{
