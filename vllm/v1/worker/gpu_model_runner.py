@@ -1581,7 +1581,20 @@ class GPUModelRunner(
             # window size when capturing to make sure the correct kernel is selected.
             max_seq_len = self.max_model_len
         else:
-            max_seq_len = self.seq_lens.np[:num_reqs].max().item()
+            if num_dycp_reqs > 0:
+                num_partitions = self.cp_world_size * self.parallel_config.cp_kv_cache_interleave_size
+                max_cp_seq_len = self.seq_lens.np[:num_dycp_reqs].max().item()
+                max_cp_seq_len_split = (
+                    (max_cp_seq_len + num_partitions - 1) // num_partitions
+                ) * self.parallel_config.cp_kv_cache_interleave_size
+                dycp_slice = self.seq_lens.np[num_dycp_reqs:num_reqs]
+                if dycp_slice.size > 0:
+                    max_normal_seq_len = max(max_cp_seq_len_split, dycp_slice.max().item())
+                else:
+                    max_normal_seq_len = 0
+                max_seq_len = max(max_cp_seq_len_split, max_normal_seq_len)
+            else:
+                max_seq_len = self.seq_lens.np[:num_reqs].max().item()
 
         if use_spec_decode:
             self.num_accepted_tokens.np[:num_reqs] = (
@@ -4584,7 +4597,7 @@ class GPUModelRunner(
             else:
                 lora_cases = [False]
 
-            cp_tokens_list = [i for i in range(self.compilation_config.cudagraph_capture_sizes_for_cp)] 
+            cp_tokens_list = [i for i in range(self.compilation_config.cudagraph_capture_sizes_for_cp+1)] 
             if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
                 cudagraph_runtime_mode = cudagraph_mode.mixed_mode()
                 # make sure we capture the largest batch size first

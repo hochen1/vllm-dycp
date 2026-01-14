@@ -593,7 +593,7 @@ class CrossDPScheduler(Scheduler):
                     break
                 request = self.waiting.peek_request()
                 if len(request.cp_ranks) == 0:
-                    if request.num_tokens > 1024 * 100:
+                    if request.num_tokens > 1024 * 1:
                         print(f"It's a cp request, token num: {request.num_tokens}",flush=True)
                         if self.cp_request_count >= self.max_cp_tokens:
                             continue

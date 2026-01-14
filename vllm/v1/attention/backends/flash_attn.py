@@ -453,8 +453,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 
         elif self.dycp_world_size > 1:
             num_dycp_reqs = common_attn_metadata.num_dycp_reqs
-            query_kv_lens = query_start_loc[1:] - query_start_loc[:-1]
-            dycp_context_kv_lens = seq_lens - query_kv_lens
 
             dycp_context_kv_lens = get_dcp_local_seq_lens(
                 dycp_context_kv_lens,
@@ -462,7 +460,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 self.dycp_rank,
                 self.cp_kv_cache_interleave_size,
             )
-            # After DCP distribution, the maximum number of tokens for any rank is
+
+            # After DYCP distribution, the maximum number of tokens for any rank is
             # ceil(L / (N * I)) * I, where L is max_seq_len, N is dcp_world_size,
             # and I is cp_kv_cache_interleave_size.
             # This eliminates GPU->CPU sync while minimizing workspace over-allocation.
