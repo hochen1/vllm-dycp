@@ -212,8 +212,6 @@ class FlashAttentionMetadata:
     prefix_scheduler_metadata: torch.Tensor | None = None
     max_num_splits: int = 0
     # For dycp
-    max_dycp_context_kv_len: int | None = None
-    dycp_context_kv_lens: torch.Tensor | None = None
     num_decodes:int = 0
     num_prefills: int = 0
     num_decode_tokens: int = 0
@@ -411,7 +409,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 
         use_cascade = common_prefix_len > 0
         max_dcp_context_kv_len = 0
-        max_dycp_context_kv_len = 0
         dcp_context_kv_lens = None
         dycp_context_kv_lens = None
 
@@ -454,7 +451,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 causal=False,
             )
 
-        if self.dycp_world_size > 1:
+        elif self.dycp_world_size > 1:
+            num_dycp_reqs = common_attn_metadata.num_dycp_reqs
             query_kv_lens = query_start_loc[1:] - query_start_loc[:-1]
             dycp_context_kv_lens = seq_lens - query_kv_lens
 
@@ -469,16 +467,13 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             # and I is cp_kv_cache_interleave_size.
             # This eliminates GPU->CPU sync while minimizing workspace over-allocation.
             num_partitions = self.dycp_world_size * self.cp_kv_cache_interleave_size
-            max_dycp_context_kv_len = (
-                (max_seq_len + num_partitions - 1) // num_partitions
-            ) * self.cp_kv_cache_interleave_size
-
+            seqlens=torch.cat([dycp_context_kv_lens[num_dycp_reqs:], seq_lens[num_dycp_reqs:]],dim=0)
             scheduler_metadata = schedule(
                 batch_size=num_reqs,
                 cu_query_lens=query_start_loc,
                 max_query_len=max_query_len,
-                seqlens=dycp_context_kv_lens,
-                max_seq_len=max_dycp_context_kv_len,
+                seqlens=seqlens,
+                max_seq_len=max_seq_len,
                 causal=False,
             )
 
@@ -536,9 +531,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
             max_dcp_context_kv_len=max_dcp_context_kv_len,
-            max_dycp_context_kv_len=max_dycp_context_kv_len,
             dcp_context_kv_lens=dcp_context_kv_lens,
-            dycp_context_kv_lens=dycp_context_kv_lens,
             use_cascade=use_cascade,
             common_prefix_len=common_prefix_len,
             scheduler_metadata=scheduler_metadata,
@@ -755,7 +748,7 @@ class FlashAttentionImpl(AttentionImpl):
                     v_descale=layer._v_scale.expand(descale_shape),
                 )
                 return output
-            if has_decode and self.dycp_world_size > 1:
+            elif has_decode and self.dycp_world_size > 1:
                 self._forward_decode_with_dycp(
                     query[:num_actual_tokens],
                     key_cache,
@@ -836,6 +829,8 @@ class FlashAttentionImpl(AttentionImpl):
         cu_seqlens_q = attn_metadata.query_start_loc
         max_seqlen_q = attn_metadata.max_query_len
         block_table = attn_metadata.block_table
+        seqused_k = attn_metadata.seq_lens
+        max_seqlen_k = attn_metadata.max_seq_len
 
         context_attn_out, context_lse = flash_attn_varlen_func(
             q=query,
@@ -844,8 +839,8 @@ class FlashAttentionImpl(AttentionImpl):
             out=None,
             cu_seqlens_q=cu_seqlens_q,
             max_seqlen_q=max_seqlen_q,
-            seqused_k=attn_metadata.dycp_context_kv_lens,
-            max_seqlen_k=attn_metadata.max_dycp_context_kv_len,
+            seqused_k=seqused_k,
+            max_seqlen_k=max_seqlen_k,
             softmax_scale=self.scale,
             causal=False,
             alibi_slopes=self.alibi_slopes,
@@ -860,9 +855,9 @@ class FlashAttentionImpl(AttentionImpl):
             v_descale=v_descale,
         )
         # FA returns LSE in shape [ H, B ] but cp_lse_ag_out_rs wants [ B, H ]
-        output[attn_metadata.num_dycp_reqs:].copy_(cp_lse_ag_out_ar(
-            context_attn_out[attn_metadata.num_dycp_reqs:],
-            context_lse.transpose(0, 1)[attn_metadata.num_dycp_reqs:],
+        output[:attn_metadata.num_dycp_reqs].copy_(cp_lse_ag_out_ar(
+            context_attn_out[:attn_metadata.num_dycp_reqs],
+            context_lse.transpose(0, 1)[:attn_metadata.num_dycp_reqs],
             get_dycp_group(),
             return_lse=False,
         ))
