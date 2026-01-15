@@ -135,7 +135,7 @@ class CudagraphDispatcher:
             ]
 
             
-            num_cp_tokens_list = [i for i in range(self.compilation_config.cudagraph_capture_sizes_for_cp)]
+            num_cp_tokens_list = [i for i in range(self.compilation_config.cudagraph_capture_sizes_for_cp + 1)]
             for bs, has_lora, cp_tokens in product(cudagraph_capture_sizes_for_decode, lora_cases, num_cp_tokens_list):
                 self.add_cudagraph_key(
                     CUDAGraphMode.FULL,

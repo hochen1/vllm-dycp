@@ -1,18 +1,7 @@
-# vLLM-DyCP
-Support Dynamic Context parellem on decode instance on vLLM.
-## System Overview
-![alt text](./dycp/images/dycp.png)
-## Install vLLM
-``` shell
-VLLM_USE_PRECOMPILED=1 uv pip install --editable .
-```
-## Launch Server
-Currently, only the CrossDPExampleConnector is supported for performance testing.
-```shell
 set -x
 
 export NCCL_DEBUG=WARN
-export MODEL_PATH=/weights/DeepSeek-V2-Lite/
+export MODEL_PATH=/weights/qwen/Qwen3-30B-A3B-Instruct-2507/
 export VLLM_USE_V1=1
 export COMMON_ARGS="
     --trust-remote-code
@@ -22,6 +11,8 @@ export COMMON_ARGS="
 "
 export VLLM_VERSION=0.13.0
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=380
+export VLLM_ATTENTION_BACKEND=FLASH_ATTN
+# export CUDA_LAUNCH_BLOCKING=1
 
 ulimit -n 65536
 vllm serve ${MODEL_PATH} \
@@ -32,15 +23,15 @@ vllm serve ${MODEL_PATH} \
     --max-num-batched-tokens 16384 \
     --gpu-memory-utilization 0.80 \
     --no-enable-prefix-caching \
-    --data-parallel-size 4 \
-    --tensor-parallel-size 1 \
-    --dp-per-domain 4 \
+    --data-parallel-size 2 \
+    --tensor-parallel-size 2 \
+    --dp-per-domain 2 \
     --block-size 64 \
     --cp-kv-cache-interleave-size 64 \
     --no-enforce-eager \
     --max-num-seqs 6 \
-    --enable-expert-parallel \
     --num-cp-seqs 2 \
+    --enable-expert-parallel \
     --compilation-config '{"cudagraph_capture_sizes":[6], "cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes_for_cp": 2}' \
     --kv-transfer-config \
     '{
@@ -57,9 +48,8 @@ vllm serve ${MODEL_PATH} \
                     "tp_size": 16
              },
              "decode": {
-                    "dp_size": 4,
-                    "tp_size": 1
+                    "dp_size": 2,
+                    "tp_size": 2
              }
         }
     }'
-```

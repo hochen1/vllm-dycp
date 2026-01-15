@@ -4584,7 +4584,7 @@ class GPUModelRunner(
             else:
                 lora_cases = [False]
 
-            cp_tokens_list = [i for i in range(self.compilation_config.cudagraph_capture_sizes_for_cp)] 
+            cp_tokens_list = [i for i in range(self.compilation_config.cudagraph_capture_sizes_for_cp + 1)] 
             if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
                 cudagraph_runtime_mode = cudagraph_mode.mixed_mode()
                 # make sure we capture the largest batch size first

@@ -1,3 +1,4 @@
+from ast import Set
 import itertools
 import time
 from collections import defaultdict
@@ -134,7 +135,8 @@ class CrossDPScheduler(Scheduler):
     def _free_request(self, request: Request) -> dict[str, Any] | None:
         assert request.is_finished()
 
-        self.cp_request_count -= 1
+        if len(request.cp_ranks) > 1:
+            self.cp_request_count -= 1
 
         delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)
@@ -572,8 +574,7 @@ class CrossDPScheduler(Scheduler):
             # num_scheduled_tokens[request.request_id] = num_new_tokens
             for rank in request.cp_ranks:
                 num_scheduled_tokens[rank][request.request_id] = num_new_tokens
-                if len(request.cp_ranks) != 1:
-                    cp_rank_scheduled_tokens[rank][request.request_id] = len(request.cp_ranks)
+                cp_rank_scheduled_tokens[rank][request.request_id] = len(request.cp_ranks)
             
             logger.debug(f"req_id={request.request_id}, num_scheduled_tokens={num_scheduled_tokens}, ranks: {request.cp_ranks}")
 
@@ -593,10 +594,9 @@ class CrossDPScheduler(Scheduler):
                     break
                 request = self.waiting.peek_request()
                 if len(request.cp_ranks) == 0:
-                    if request.num_tokens > 1024 * 100:
-                        print(f"It's a cp request, token num: {request.num_tokens}",flush=True)
+                    if request.num_tokens > 256:
                         if self.cp_request_count >= self.max_cp_tokens:
-                            continue
+                            break
                         request.cp_ranks = [idx for idx in range(self.cp_world_size)]
                         self.cp_request_count += 1
                         logger.info(f"It's a cp request, token num: {request.num_tokens}")
@@ -795,8 +795,7 @@ class CrossDPScheduler(Scheduler):
                 """
                 for rank in request.cp_ranks:
                     num_scheduled_tokens[rank][request.request_id] = num_new_tokens
-                    if len(request.cp_ranks) != 1:
-                        cp_rank_scheduled_tokens[rank][request.request_id] = len(request.cp_ranks)
+                    cp_rank_scheduled_tokens[rank][request.request_id] = len(request.cp_ranks)
                 # num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING

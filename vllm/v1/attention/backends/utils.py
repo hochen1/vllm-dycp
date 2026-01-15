@@ -1222,15 +1222,52 @@ def reorder_batch_to_split_cp_and_normal(
     scheduler_output: "SchedulerOutput",
 ) -> bool:
     """Move CP-flagged requests to the front of the batch."""
+
     req_ids = input_batch.req_ids
-    is_cp = np.array([True if scheduler_output.cp_rank_scheduled_tokens[rid] > 1 else False for rid in req_ids])
+    num_reqs = len(req_ids)
+
+    # 1. Mark which requests are CP（cp_rank_scheduled_tokens[rid] > 1）
+    is_cp = np.array(
+        [scheduler_output.cp_rank_scheduled_tokens[rid] > 1 for rid in req_ids],
+        dtype=bool,
+    )
+
+    # If all requests are CP or all are not CP, no need to swap
     if not is_cp.any() or is_cp.all():
         return False
-    tgt = np.arange(len(req_ids))
-    tgt_cp, tgt_ncp = tgt[is_cp], tgt[~is_cp]
-    tgt[:] = np.concatenate([tgt_cp, tgt_ncp])
-    for src, dst in enumerate(tgt):
+
+    # 2. Calculate target positions: first CP, then non-CP
+    tgt = np.arange(num_reqs)
+    tgt_cp = tgt[is_cp]
+    tgt_ncp = tgt[~is_cp]
+    target_positions = np.concatenate([tgt_cp, tgt_ncp])
+    # target_positions represents the target position for the element at index i
+
+    # 3. Construct the mapping of source to destination: src(current position) -> dst(target position)
+    src_dest_map: dict[int, int] = {}
+    for src, dst in enumerate(target_positions):
+        if src != dst:
+            src_dest_map[src] = int(dst)
+
+    if not src_dest_map:
+        return False
+
+    # 4. Swap by cycles, and mark as done to avoid deadlocks
+    for src in list(src_dest_map.keys()):
+        # This src may have been marked as done in previous cycles
+        if src not in src_dest_map:
+            continue
+
+        dst = src_dest_map[src]
         while src != dst:
             input_batch.swap_states(src, dst)
-            src, dst = dst, tgt[dst]
+
+            # The next dst, if dst is not in the map, it means it has already been placed
+            next_dst = src_dest_map.get(dst, dst)
+
+            # Mark dst as done, so next time we won't continue this cycle
+            src_dest_map[dst] = dst
+
+            dst = next_dst
+
     return True
