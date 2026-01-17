@@ -583,15 +583,7 @@ class Worker(WorkerBase):
         self, scheduler_outputs: "SchedulerOutput | list[SchedulerOutput | None]"
     ) -> ModelRunnerOutput | None:
         if isinstance(scheduler_outputs, list):
-
             scheduler_output = scheduler_outputs[self.model_runner.cp_rank]
-
-            if scheduler_output is None:
-                logger.debug(f"{self.model_runner.cp_rank} execute dummy run !")
-                self.model_runner._dummy_run(1, force_attention=True, uniform_decode=True)
-                return False
-            elif scheduler_output is False:
-                return False
         else:
             scheduler_output = scheduler_outputs
         

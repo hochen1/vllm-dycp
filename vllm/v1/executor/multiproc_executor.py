@@ -656,7 +656,7 @@ class DomainMultiprocExecutor(MultiprocExecutor):
     
     def execute_model(  # type: ignore[override]
         self, scheduler_outputs: list[SchedulerOutput], non_block: bool = False
-    ) -> Future[list[None]]:
+    ) -> Future[list[ModelRunnerOutput | None]]:
         return self.collective_rpc(
             "execute_model",
             args=(scheduler_outputs,),
@@ -1086,8 +1086,7 @@ class WorkerProc:
 
     @staticmethod
     def setup_proc_title_and_log_prefix(enable_ep: bool) -> None:
-        domain_size = get_dycp_group().world_size
-        domain_rank = get_dycp_group().rank_in_group
+        dp_per_domain = get_dycp_group().world_size
         dp_size = get_dp_group().world_size
         dp_rank = get_dp_group().rank_in_group
         pp_size = get_pp_group().world_size
@@ -1098,8 +1097,9 @@ class WorkerProc:
         tp_rank = get_tp_group().rank_in_group
         dcp_size = get_dcp_group().world_size
         dcp_rank = get_dcp_group().rank_in_group
+        domain_rank = dp_rank // dp_per_domain
         process_name = "Worker"
-        if domain_size > 1:
+        if dp_per_domain > 1:
             process_name += f"_Domain{domain_rank}"
         if dp_size > 1:
             process_name += f"_DP{dp_rank}"

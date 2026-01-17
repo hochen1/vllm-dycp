@@ -40,7 +40,7 @@ from vllm.v1.core.sched.output import (
     NewRequestData,
     SchedulerOutput,
 )
-from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
+from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue, LongShortRequestQueue
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -58,6 +58,66 @@ from vllm.v1.core.sched.scheduler import Scheduler
 
 
 logger = init_logger(__name__)
+
+class RequestManager:
+    def __init__(
+        self,
+        cp_world_size: int,
+        max_num_seqs: int,
+    ):
+        self.cp_world_size = cp_world_size
+        self.max_num_seqs = max_num_seqs
+        self.num_long_req_per_domain = 0
+        self.num_req_per_dp = [0] * self.cp_world_size
+
+    def select_dp(self, request: Request, is_long: bool) -> list[int] | None:
+        if len(request.cp_ranks) > 0:
+            if all([self.num_req_per_dp[rank] < self.max_num_seqs for rank in request.cp_ranks]):
+                return request.cp_ranks
+            else:
+                return None
+        
+        if is_long:
+            return [
+                i for i in range(self.cp_world_size)
+            ]
+        else:
+            # Get the the dp with the least number of requests
+            best_dp = min(range(len(self.num_req_per_dp)), key=lambda i: self.num_req_per_dp[i])
+            return [best_dp]
+    
+    def add_req(self, request: Request) -> None:
+        if len(request.cp_ranks) > 1:
+            self.num_long_req_per_domain += 1
+
+        for rank in request.cp_ranks:
+            self.num_req_per_dp[rank] += 1
+    
+    def free_req(self, request: Request) -> None:
+        if len(request.cp_ranks) > 1:
+            self.num_long_req_per_domain -= 1
+
+        for rank in request.cp_ranks:
+            self.num_req_per_dp[rank] -= 1
+
+    def get_num_req_per_dp(self, dp_rank: int) -> int:
+        return self.num_req_per_dp[dp_rank]
+
+    def get_num_cp_req_per_domain(self) -> int:
+        return self.num_long_req_per_domain
+
+    def get_total_num_req(self) -> int:
+        return sum(self.num_req_per_dp) - self.num_long_req_per_domain * (self.cp_world_size - 1)
+
+    def has_slot_for_long_request(self) -> bool:
+        return all(self.num_req_per_dp[i] < self.max_num_seqs for i in range(self.cp_world_size))
+
+    def __repr__(self) -> str:
+        return (f"RequestManager(cp_world_size={self.cp_world_size}"
+                + f"max_num_seqs={self.max_num_seqs}"
+                + f"max_num_seqs={self.max_num_seqs}, "
+                + f"num_long_req_per_domain={self.num_long_req_per_domain}, "
+                + f"num_req_per_dp={self.num_req_per_dp})")
 
 class CrossDPScheduler(Scheduler):
     def __init__(
@@ -95,8 +155,15 @@ class CrossDPScheduler(Scheduler):
             metrics_collector=self.kv_metrics_collector,
         )
         self.max_cp_tokens = self.vllm_config.scheduler_config.num_cp_seqs
-        self.req_count = 0
-        self.cp_request_count = 0
+        # Request queue control the token threshold for long requests.
+        self.waiting = LongShortRequestQueue(
+            long_request_threshold=128 * 1024,
+            max_long_requests=self.max_cp_tokens,
+        )
+        self.request_manager = RequestManager(
+            cp_world_size=self.cp_world_size,
+            max_num_seqs=self.max_num_running_reqs,
+        )
 
     def _update_after_schedule(
         self,
@@ -135,8 +202,15 @@ class CrossDPScheduler(Scheduler):
     def _free_request(self, request: Request) -> dict[str, Any] | None:
         assert request.is_finished()
 
-        if len(request.cp_ranks) > 1:
-            self.cp_request_count -= 1
+        """
+        TODO(AoChen): If the req is removed from the running queue, 
+        1. the running_long_count should be decremented.
+        2. the request manager should be updated.
+        3. the has_slot_for_long_request should be updated.
+        """
+        self.waiting.running_long_count -= 1 if self.waiting.is_long_request(request) else 0
+        self.request_manager.free_req(request)
+        self.waiting.has_slot_for_long_request = self.request_manager.has_slot_for_long_request()
 
         delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)
@@ -193,7 +267,7 @@ class CrossDPScheduler(Scheduler):
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         
         for scheduler_output, model_runner_output in zip(scheduler_outputs, model_runner_outputs):
-            if scheduler_output is None:
+            if model_runner_output is False:
                 continue
 
             sampled_token_ids = model_runner_output.sampled_token_ids
@@ -541,6 +615,12 @@ class CrossDPScheduler(Scheduler):
                         raise NotImplementedError
                     else:
                         preempted_req = self.running.pop()
+                        """
+                        TODO(AoChen): Preempted request is also need to be removed from the request manager.
+                        """
+                        self.request_manager.free_req(preempted_req)
+                        self.waiting.running_long_count -= 1 if self.waiting.is_long_request(preempted_req) else 0
+                        self.waiting.has_slot_for_long_request = self.request_manager.has_slot_for_long_request()
 
                     self._preempt_request(preempted_req, scheduled_timestamp)
                     
@@ -558,26 +638,15 @@ class CrossDPScheduler(Scheduler):
             if new_blocks is None:
                 # Cannot schedule this request.
                 break
-
-            # Schedule the request.
-            for rank in request.cp_ranks:
-                scheduled_running_reqs[rank].append(request)
-        
-            # req_to_new_blocks[request.request_id] = new_blocks
-            assert len(request.cp_ranks) == len(new_blocks)
-            for i, rank in enumerate(request.cp_ranks):
-                req_to_new_blocks[rank][request.request_id] = new_blocks[i]
             
-            """
-            TODO(AoChen): num_scheduled_tokens should be a list of ints for each DCP rank or something else.
-            """
-            # num_scheduled_tokens[request.request_id] = num_new_tokens
-            for rank in request.cp_ranks:
+            assert len(request.cp_ranks) == len(new_blocks)
+            # Schedule the request.
+            for i, rank in enumerate(request.cp_ranks):
+                scheduled_running_reqs[rank].append(request)
+                req_to_new_blocks[rank][request.request_id] = new_blocks[i]
                 num_scheduled_tokens[rank][request.request_id] = num_new_tokens
                 cp_rank_scheduled_tokens[rank][request.request_id] = len(request.cp_ranks)
             
-            logger.debug(f"req_id={request.request_id}, num_scheduled_tokens={num_scheduled_tokens}, ranks: {request.cp_ranks}")
-
             token_budget -= num_new_tokens
             req_index += 1
 
@@ -589,22 +658,31 @@ class CrossDPScheduler(Scheduler):
         if not any(preempted_reqs):
             while self.waiting and token_budget > 0:
                 if len(self.running) == (
-                    (self.max_num_running_reqs - self.cp_request_count) * self.cp_world_size + self.cp_request_count
+                    (self.max_num_running_reqs - self.waiting.running_long_count) * self.cp_world_size + self.waiting.running_long_count
                 ):
                     break
                 request = self.waiting.peek_request()
+                if request is None:
+                    break
+
                 if len(request.cp_ranks) == 0:
-                    if request.num_tokens > 256:
-                        if self.cp_request_count >= self.max_cp_tokens:
-                            break
-                        request.cp_ranks = [idx for idx in range(self.cp_world_size)]
-                        self.cp_request_count += 1
-                        logger.info(f"It's a cp request, token num: {request.num_tokens}")
-                    else:
-                        request.cp_ranks = [self.req_count % self.cp_world_size]
-                        self.req_count += 1
-                        logger.debug(f"scheduling request= {request.request_id} to rank {request.cp_ranks}")
-            
+                    selected_dp = self.request_manager.select_dp(
+                        request, 
+                        self.waiting.is_long_request(request)
+                    )
+                else:
+                    selected_dp = self.request_manager.select_dp(
+                        request, 
+                        self.waiting.is_long_request(request)
+                    )
+                    if selected_dp is None:
+                        break
+                
+                if len(selected_dp) > 1:
+                    logger.info(f"It's a cp req, selected_dp: {selected_dp}, request id: {request.request_id}")
+                else:
+                    logger.info(f"It's a short req, selected_dp: {selected_dp}, request id: {request.request_id}")
+
                 # KVTransfer: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                     is_ready = self._update_waiting_for_remote_kv(request)
@@ -723,7 +801,7 @@ class CrossDPScheduler(Scheduler):
                     num_encoder_tokens = 0
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
-                    request.cp_ranks,
+                    selected_dp,
                     request,
                     num_new_tokens + num_external_computed_tokens,
                     num_new_local_computed_tokens,
@@ -741,6 +819,8 @@ class CrossDPScheduler(Scheduler):
                 # if a load is needed. Note that
                 # This information is used to determine if a load is
                 # needed for this request.
+                request.cp_ranks = selected_dp
+
                 """
                 TODO(AoChen): update_state_after_alloc(PD disagg) is not implemented yet.
                 """
@@ -769,34 +849,30 @@ class CrossDPScheduler(Scheduler):
                 self._update_connector_prefix_cache_stats(request)
                 
                 self.running.append(request)
+                self.waiting.running_long_count += 1 if self.waiting.is_long_request(request) else 0
+                self.request_manager.add_req(request)
+                self.waiting.has_slot_for_long_request = self.request_manager.has_slot_for_long_request()
+
                 if self.log_stats:
                     request.record_event(
                         EngineCoreEventType.SCHEDULED, scheduled_timestamp
                     )
-                if request.status == RequestStatus.WAITING:
-                    # scheduled_new_reqs.append(request)
-                    for idx in request.cp_ranks:
-                        scheduled_new_reqs[idx].append(request)
-                elif request.status == RequestStatus.PREEMPTED:
-                    # scheduled_resumed_reqs.append(request)
-                    for idx in request.cp_ranks:
-                        scheduled_resumed_reqs[idx].append(request)
-                else:
-                    raise RuntimeError(f"Invalid request status: {request.status}")
-
+                
                 blocks = self.kv_cache_manager.get_blocks(request)
-                for idx, rank in enumerate(request.cp_ranks):
-                    req_to_new_blocks[rank][request.request_id] = (
-                        blocks[idx]
-                    )
 
-                """
-                TODO(AoChen): num_scheduled_tokens should be a list of ints for each DCP rank or something else.
-                """
-                for rank in request.cp_ranks:
+                for idx, rank in enumerate(request.cp_ranks):
+                    if request.status == RequestStatus.WAITING:
+                        scheduled_new_reqs[rank].append(request)
+                    elif request.status == RequestStatus.PREEMPTED:
+                        scheduled_resumed_reqs[rank].append(request)
+                    else:
+                        raise RuntimeError(f"Invalid request status: {request.status}")
+                    
+                    req_to_new_blocks[rank][request.request_id] = blocks[idx]
+
                     num_scheduled_tokens[rank][request.request_id] = num_new_tokens
                     cp_rank_scheduled_tokens[rank][request.request_id] = len(request.cp_ranks)
-                # num_scheduled_tokens[request.request_id] = num_new_tokens
+                    
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
@@ -817,14 +893,8 @@ class CrossDPScheduler(Scheduler):
 
         assert token_budget >= 0
         assert len(self.running) <= (
-            (self.max_num_running_reqs - self.cp_request_count) * self.cp_world_size + self.cp_request_count
+            (self.max_num_running_reqs - self.waiting.running_long_count) * self.cp_world_size + self.waiting.running_long_count
         )
-        # Since some requests in the RUNNING queue may not be scheduled in
-        # this step, the total number of scheduled requests can be smaller than
-        # len(self.running).
-        # assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(
-        #     scheduled_running_reqs
-        # ) <= len(self.running)
         
         total_scheduled = (
             len(list(chain.from_iterable(scheduled_new_reqs)))
@@ -869,15 +939,12 @@ class CrossDPScheduler(Scheduler):
             self.prev_step_scheduled_req_ids.update(scheduled_tokens.keys())
 
         total_scheduler_output = []
-        have_total_num_scheduled_tokens_zero_output = False
 
         for idx in range(self.cp_world_size):
             
             if sum(num_scheduled_tokens[idx].values()) == 0 and len(preempted_reqs[idx]) == 0 and len(self.finished_req_ids[idx]) == 0:
-                total_scheduler_output.append(None)
+                total_scheduler_output.append(SchedulerOutput.make_empty())
             else:
-                if sum(num_scheduled_tokens[idx].values()) == 0:
-                    have_total_num_scheduled_tokens_zero_output = True
                 total_scheduler_output.append(
                     SchedulerOutput(
                         scheduled_new_reqs=total_new_reqs_data[idx],
@@ -897,7 +964,6 @@ class CrossDPScheduler(Scheduler):
                         cp_rank=idx,
                         cp_rank_scheduled_tokens=cp_rank_scheduled_tokens[idx],
                         num_cp_request=sum([1 if cp_size > 1 else 0 for cp_size in  cp_rank_scheduled_tokens[idx].values()])
-                        # cp_rank_scheduled_tokens[rank][request.request_id] = len(request.cp_ranks)
                     )
                 )
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -920,4 +986,63 @@ class CrossDPScheduler(Scheduler):
                     continue
                 self._update_after_schedule(scheduler_output)
         
-        return total_scheduler_output, have_total_num_scheduled_tokens_zero_output
+        return total_scheduler_output
+
+
+class AsyncCrossDPScheduler(CrossDPScheduler):
+    def _update_after_schedule(
+        self,
+        scheduler_output: SchedulerOutput,
+    ) -> None:
+        super()._update_after_schedule(scheduler_output)
+        pending_structured_output_tokens = False
+        spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
+        for req_id in scheduler_output.num_scheduled_tokens:
+            request = self.requests[req_id]
+            pending_structured_output_tokens |= (
+                request.use_structured_output and request.num_output_placeholders > 0
+            )
+            cur_num_spec_tokens = len(spec_decode_tokens.get(req_id, ()))
+            if (
+                request.num_computed_tokens
+                == request.num_tokens
+                + request.num_output_placeholders
+                + cur_num_spec_tokens
+            ):
+                # The request will generate a new token plus num_spec_tokens
+                # in this scheduling step.
+                request.num_output_placeholders += 1 + cur_num_spec_tokens
+                # Add placeholders for the new tokens in spec_token_ids.
+                # We will update the actual spec token ids in the worker process.
+                request.spec_token_ids = [-1] * self.num_spec_tokens
+
+        scheduler_output.pending_structured_output_tokens = (
+            pending_structured_output_tokens
+        )
+
+    def _update_request_with_output(
+        self,
+        request: Request,
+        new_token_ids: list[int],
+    ) -> tuple[list[int], bool]:
+        if request.discard_latest_async_tokens:
+            # If the request is force preempted in reset_prefix_cache, we
+            # should discard the latest async token.
+            request.discard_latest_async_tokens = False
+            return [], False
+
+        status_before_update = request.status
+        new_token_ids, stopped = super()._update_request_with_output(
+            request, new_token_ids
+        )
+
+        # Update the number of output placeholders.
+        request.num_output_placeholders -= len(new_token_ids)
+        assert request.num_output_placeholders >= 0
+
+        # Cache the new tokens. Preempted requests should be skipped.
+        if status_before_update == RequestStatus.RUNNING:
+            self.kv_cache_manager.cache_blocks(
+                request, request.num_computed_tokens - request.num_output_placeholders
+            )
+        return new_token_ids, stopped

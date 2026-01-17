@@ -62,6 +62,16 @@ async def main():
             },
             "4k-prompt-3",
         ),
+        req(
+            {
+                "model": "auto",
+                "prompt": p2k,
+                "max_tokens": 10,
+                "temperature": 0,
+                "top_p": 1.0,
+            },
+            "2k-prompt-3",
+        ),
     ]
     await asyncio.gather(*tasks)
 
