@@ -552,7 +552,7 @@ class CrossDPScheduler(Scheduler):
                 # partial draft tokens since this prevents uniform decode optimizations.
                 req_index += 1
                 continue
-
+      
             num_new_tokens = (
                 request.num_tokens_with_spec
                 + request.num_output_placeholders
@@ -660,6 +660,7 @@ class CrossDPScheduler(Scheduler):
                 if len(self.running) == (
                     (self.max_num_running_reqs - self.waiting.running_long_count) * self.cp_world_size + self.waiting.running_long_count
                 ):
+                    print("Can't schedule here, running queue is full", flush=True)
                     break
                 request = self.waiting.peek_request()
                 if request is None:
@@ -676,12 +677,13 @@ class CrossDPScheduler(Scheduler):
                         self.waiting.is_long_request(request)
                     )
                     if selected_dp is None:
+                        print("Can't schedule here, selected_dp is None", flush=True)
                         break
-                
-                if len(selected_dp) > 1:
-                    logger.info(f"It's a cp req, selected_dp: {selected_dp}, request id: {request.request_id}")
-                else:
-                    logger.info(f"It's a short req, selected_dp: {selected_dp}, request id: {request.request_id}")
+                 
+                # if len(selected_dp) > 1:
+                #     logger.info(f"It's a cp req, selected_dp: {selected_dp}, request id: {request.request_id}")
+                # else:
+                #     logger.info(f"It's a short req, selected_dp: {selected_dp}, request id: {request.request_id}")
 
                 # KVTransfer: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
@@ -732,6 +734,7 @@ class CrossDPScheduler(Scheduler):
                             # the number of matched tokens.
                             self.waiting.pop_request()
                             skipped_waiting_requests.prepend_request(request)
+                            print("Can't schedule here, ext_tokens is None", flush=True)
                             continue
 
                         request.num_external_computed_tokens = ext_tokens
@@ -813,6 +816,8 @@ class CrossDPScheduler(Scheduler):
                 logger.debug(f"new_blocks -- 2: {new_blocks}, request.cp_ranks: {request.cp_ranks}, num_new_tokens: {num_new_tokens}")
                 if new_blocks is None:
                     # The request cannot be scheduled.
+                    print(f"selected_dp: {selected_dp}, num_tokens: {num_new_tokens + num_external_computed_tokens}, num local tokens: {num_new_local_computed_tokens} ")
+                    print("Have no enough blocks", flush=True)
                     break
 
                 # KVTransfer: the connector uses this info to determine
