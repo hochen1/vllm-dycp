@@ -411,7 +411,7 @@ class CrossDPKVCacheManager:
             num_computed_tokens + num_new_tokens + num_lookahead_tokens,
             self.max_model_len,
         )
-
+        logger.info(f"chenxiao--debug num_computed_tokens:{num_computed_tokens};num_new_tokens:{num_new_tokens},num_lookahead_tokens:{num_lookahead_tokens}")
         # Now the get_num_blocks_to_allocate return a int, it seems wrong, 
         # it should return a list[int], len(list[int]) = len(cp_rank)
         num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
@@ -421,7 +421,7 @@ class CrossDPKVCacheManager:
             new_computed_blocks=new_computed_block_list,
             num_encoder_tokens=num_encoder_tokens,
         )
-
+        logger.info(f"chenxiao--debug num_blocks_to_allocate:{num_blocks_to_allocate}")
         # This condition should be rewrite later for fine grained corss dp block allocation
         if all([num_blocks_to_allocate > block_pool.get_num_free_blocks() for block_pool in self.block_pools]):
             # Cannot allocate new blocks
