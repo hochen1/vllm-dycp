@@ -678,10 +678,6 @@ class CrossDPScheduler(Scheduler):
                     if selected_dp is None:
                         break
                 
-                if len(selected_dp) > 1:
-                    logger.info(f"It's a cp req, selected_dp: {selected_dp}, request id: {request.request_id}")
-                else:
-                    logger.info(f"It's a short req, selected_dp: {selected_dp}, request id: {request.request_id}")
 
                 # KVTransfer: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
@@ -810,7 +806,7 @@ class CrossDPScheduler(Scheduler):
                     delay_cache_blocks=load_kv_async,
                     num_encoder_tokens=num_encoder_tokens,
                 )
-                logger.info(f"chenxiao--debug new_blocks: {new_blocks}, request.cp_ranks: {request.cp_ranks}, num_new_tokens: {num_new_tokens}")
+                logger.debug(f"new_blocks -- 2: {new_blocks}, request.cp_ranks: {request.cp_ranks}, num_new_tokens: {num_new_tokens}")
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     break
