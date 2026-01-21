@@ -34,7 +34,7 @@ from vllm.v1.attention.backends.mla.common import (
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.vllm_flash_attn import flash_attn_varlen_func, get_scheduler_metadata
-
+from vllm.distributed.parallel_state import get_dycp_group
 logger = init_logger(__name__)
 
 
@@ -179,6 +179,8 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         max_query_len = query_lens_cpu.max().item()
         max_seq_len = seq_lens_cpu.max().item()
+        # if get_dycp_group().rank == 0:
+        #     print(f"max_seq_len: {max_seq_len}, sum: {seq_lens_cpu.sum()}", flush=True)
 
         # For Flash Attention MLA + full cudagraph
         max_num_splits = 0

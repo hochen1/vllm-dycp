@@ -1659,6 +1659,9 @@ class GPUModelRunner(
                 self.cp_rank,
                 self.parallel_config.cp_kv_cache_interleave_size,
             )
+            # if num_dycp_reqs > 0:
+            #     max_len = self.dycp_local_seq_lens.cpu[:num_dycp_reqs].max().item()   # .item() -> Python int/float
+            #     logger.info("self.dycp_local_seq_lens max: %d", max_len)
             self.dycp_local_seq_lens.cpu[num_dycp_reqs:num_reqs].copy_(self.seq_lens.cpu[num_dycp_reqs:num_reqs])
             self.dycp_local_seq_lens.cpu[num_reqs:].fill_(0)
             self.dycp_local_seq_lens.copy_to_gpu(num_reqs_padded)
@@ -3135,7 +3138,9 @@ class GPUModelRunner(
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
         ):
-            start_time = time.perf_counter()
+            # if get_dcp_group().rank == 0:
+            #     print(f"batch_desc: {batch_desc}", flush=True)
+            # start_time = time.perf_counter()
             model_output = self._model_forward(
                 input_ids=input_ids,
                 positions=positions,
@@ -3143,9 +3148,10 @@ class GPUModelRunner(
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
-            torch.cuda.synchronize()
-            end_time = time.perf_counter()
-            print(f"model_forward time: {(end_time - start_time) * 1000 : .3f}", flush=True)
+            # torch.cuda.synchronize()
+            # end_time = time.perf_counter()
+            # if get_dcp_group().rank == 0:
+            #     print(f"model_forward time: {(end_time - start_time) * 1000 : .3f}", flush=True)
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
