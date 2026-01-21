@@ -1221,7 +1221,9 @@ def reorder_batch_to_split_cp_and_normal(
     input_batch: "InputBatch",
     scheduler_output: "SchedulerOutput",
 ) -> bool:
-    """Move CP-flagged requests to the front of the batch."""
+    """Move CP-flagged requests to the front of the batch.
+       Expected order: [cp, cp, ncp, ncp], all cp is ahead of ncp
+    """
 
     req_ids = input_batch.req_ids
     num_reqs = len(req_ids)
@@ -1232,42 +1234,43 @@ def reorder_batch_to_split_cp_and_normal(
         dtype=bool,
     )
 
-    # If all requests are CP or all are not CP, no need to swap
-    if not is_cp.any() or is_cp.all():
+    # 2. Original order: cp = 0, ncp = 1
+    # [0, 1, 0, 1] (0 = cp, 1 = ncp)
+    req_regions = np.zeros(is_cp.shape, dtype=np.int32)  # 0 = decode by default
+    req_regions[~is_cp] = 1
+
+    # 3. Calculate target positions: first CP, then non-CP
+    num_cps = int(is_cp.sum())
+    # [0, 0, 1, 1] (0 = cp, 1 = ncp)
+    target_regions = np.zeros(num_reqs, dtype=np.int32)
+    target_regions[num_cps :] = 1
+
+    # [false, true, true, false] (true represents the need to swap)
+    needs_swap = req_regions != target_regions
+
+    if not needs_swap.any():
         return False
-
-    # 2. Calculate target positions: first CP, then non-CP
-    tgt = np.arange(num_reqs)
-    tgt_cp = tgt[is_cp]
-    tgt_ncp = tgt[~is_cp]
-    target_positions = np.concatenate([tgt_cp, tgt_ncp])
-    # target_positions represents the target position for the element at index i
-
-    # 3. Construct the mapping of source to destination: src(current position) -> dst(target position)
-    src_dest_map: dict[int, int] = {}
-    for src, dst in enumerate(target_positions):
-        if src != dst:
-            src_dest_map[src] = int(dst)
-
-    if not src_dest_map:
-        return False
+    
+    # Extract indices that need swapping and sort by target region
+    # [1, 2]
+    orig_indices = np.where(needs_swap)[0]
+    # [1, 0] ---> [1, 0]
+    sorted_order = np.argsort(req_regions[needs_swap], kind="stable")
+    # [2, 1]
+    src_indices = orig_indices[sorted_order]
+    # {2:1, 1:2}
+    src_dest_map = {int(src): int(dst) for src, dst in zip(src_indices, orig_indices)}
 
     # 4. Swap by cycles, and mark as done to avoid deadlocks
-    for src in list(src_dest_map.keys()):
-        # This src may have been marked as done in previous cycles
-        if src not in src_dest_map:
-            continue
-
+    # Iterate key
+    for src in src_dest_map:
         dst = src_dest_map[src]
+        # Swap alone the chain.
         while src != dst:
             input_batch.swap_states(src, dst)
-
-            # The next dst, if dst is not in the map, it means it has already been placed
+            # Mark dst as done by updating its destination to itself
             next_dst = src_dest_map.get(dst, dst)
-
-            # Mark dst as done, so next time we won't continue this cycle
             src_dest_map[dst] = dst
-
             dst = next_dst
 
     return True
