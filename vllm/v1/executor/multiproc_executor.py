@@ -157,6 +157,14 @@ class MultiprocExecutor(Executor):
             )
             for local_rank in range(self.local_world_size):
                 global_rank = global_start_rank + local_rank
+                logger.info(
+                        "Woker Rank Info: local_rank=%d, rank=%d, global_dp_rank=%d, local_dp_rank=%d, visabel device=%s",
+                        local_rank, global_rank, 
+                        self.vllm_config.parallel_config.data_parallel_rank, 
+                        self.vllm_config.parallel_config.data_parallel_rank_local,
+                        os.environ.get(current_platform.device_control_env_var, "Not Set Yet")
+                    )
+                print(f"node_rank_within_dp {self.parallel_config.node_rank_within_dp}",flush=True)
                 unready_workers.append(
                     WorkerProc.make_worker_process(
                         vllm_config=self.vllm_config,
@@ -493,9 +501,15 @@ class DomainMultiprocExecutor(MultiprocExecutor):
         try:
             dp_start_rank = self.parallel_config.domain_parallel_rank * dp_per_domain
             local_dp_start_rank = self.parallel_config.domain_parallel_rank_local * dp_per_domain
+            """
+            AOCHEN: global_start_rank = self.local_world_size * node_rank_within_domain
+            but now, doamin can't support cross multi-node, so node_rank_within_domain is always 0
+            """
             global_start_rank = (
-                dp_start_rank * per_dp_size
+                # dp_start_rank * per_dp_size
+                self.local_world_size * 0
             )
+            # local_world_size is dp_per_domain * gpu per DP represents the number of workers per domain(EngineCore)
             for local_rank in range(self.local_world_size):
                 global_rank = global_start_rank + local_rank
                 dp_rank = dp_start_rank + local_rank // per_dp_size
@@ -730,8 +744,9 @@ class WorkerProc:
         if vllm_config.parallel_config.nnodes_within_dp == 1:
             # Initialize MessageQueue for receiving SchedulerOutput
             """
-                (AOCHEN): Use self.worker.rank is unreasonable.
-                """
+            (AOCHEN): Use self.worker.rank is unreasonable.
+            """
+            print(f"input_shm_handle: {input_shm_handle}, self.rank: {self.rank}", flush=True)
             self.rpc_broadcast_mq = MessageQueue.create_from_handle(
                 # input_shm_handle, self.worker.rank
                 input_shm_handle, self.rank
@@ -769,7 +784,10 @@ class WorkerProc:
         input_shm_handle: Handle,
         shared_worker_lock: LockType,
     ):
+        # self.rank = rank
         self.rank = rank
+        # print(f"WorkeProc rank: {rank}", flush=True)
+        logger.info(f"WorkerProc rank: {self.rank}")
         wrapper = WorkerWrapperBase(
             vllm_config=vllm_config, rpc_rank=local_rank, global_rank=rank
         )

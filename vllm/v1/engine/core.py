@@ -767,6 +767,8 @@ class EngineCoreProc(EngineCore):
             bind=False,
         ) as handshake_socket:
             # Register engine with front-end.
+            # print(f"handshake_socket: {handshake_socket}, local_client: {local_client}, headless: {headless}, parallel_config_to_update: {parallel_config_to_update}, identity: {identity}", flush=True)
+            print(f"handshake_address: {handshake_address}", flush=True)
             addresses = self.startup_handshake(
                 handshake_socket, local_client, headless, parallel_config_to_update
             )
@@ -791,7 +793,7 @@ class EngineCoreProc(EngineCore):
                 ready_msg["parallel_config_hash"] = (
                     vllm_config.parallel_config.compute_hash()
                 )
-
+            print( f"identity: {identity}, vllm_config.parallel_config: {vllm_config.parallel_config}", flush=True)
             handshake_socket.send(msgspec.msgpack.encode(ready_msg))
 
     @staticmethod
@@ -811,7 +813,7 @@ class EngineCoreProc(EngineCore):
                 }
             )
         )
-
+        print(f"send hello message", flush=True)
         # Receive initialization message.
         logger.debug("Waiting for init message from front-end.")
         if not handshake_socket.poll(timeout=HANDSHAKE_TIMEOUT_MINS * 60_000):
@@ -1004,16 +1006,18 @@ class EngineCoreProc(EngineCore):
                 # Set data parallel rank for this engine process.
                 parallel_config.domain_parallel_rank = domain_rank
                 parallel_config.domain_parallel_rank_local = local_domain_rank
-                engine_core = DPEngineCoreProc(*args, **kwargs)
-                assert False, "DomainEngineCoreProc is not implemented yet"
+                logger.info(f"Domain rank: {domain_rank}, local domain rank: {local_domain_rank}")
+                engine_core = DomainEngineCoreProc(*args, **kwargs)
+                # assert False, "DomainEngineCoreProc is not implemented yet"
             else:
                 set_process_title("EngineCore")
                 decorate_logs()
                 engine_core = EngineCoreProc(*args, **kwargs)
-                scheduler_config = kwargs["vllm_config"].scheduler_config
-                engine_core.step_fn = (
-                    engine_core.step_domain_with_batch_queue if scheduler_config.async_scheduling else engine_core.step_domain
-                )
+            
+            scheduler_config = kwargs["vllm_config"].scheduler_config
+            engine_core.step_fn = (
+                engine_core.step_domain_with_batch_queue if scheduler_config.async_scheduling else engine_core.step_domain
+            )
             
             engine_core.run_busy_loop()
         
@@ -1360,6 +1364,7 @@ class DPEngineCoreProc(EngineCoreProc):
         executor_class: type[Executor],
         log_stats: bool,
         client_handshake_address: str | None = None,
+        domain_rank: int = 0,
     ):
         # Counts forward-passes of the model so that we can synchronize
         # finished with DP peers every N steps.
@@ -1376,7 +1381,7 @@ class DPEngineCoreProc(EngineCoreProc):
             executor_class,
             log_stats,
             client_handshake_address,
-            dp_rank,
+            dp_rank if vllm_config.parallel_config.dp_per_domain == 1 else domain_rank,
         )
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
@@ -1555,6 +1560,70 @@ class DPEngineCoreProc(EngineCoreProc):
             logger.info(
                 "Distributed environment reinitialized for DP rank %s", self.dp_rank
             )
+
+
+class DomainEngineCoreProc(DPEngineCoreProc):
+    """ZMQ-wrapper for running EngineCore in background process
+    in a domain parallel context."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        local_client: bool,
+        handshake_address: str,
+        executor_class: type[Executor],
+        log_stats: bool,
+        client_handshake_address: str | None = None,
+    ):
+        super().__init__(
+            vllm_config,
+            local_client,
+            handshake_address,
+            executor_class,
+            log_stats,
+            client_handshake_address,
+            vllm_config.parallel_config.domain_parallel_rank,
+        )
+
+    # def _init_doamin_parallel
+    def _init_data_parallel(self, vllm_config: VllmConfig):
+
+        domain_count = vllm_config.parallel_config.data_parallel_size // vllm_config.parallel_config.dp_per_domain
+        local_domain_rank = vllm_config.parallel_config.domain_parallel_rank_local
+        domain_rank = vllm_config.parallel_config.domain_parallel_rank
+
+        assert domain_count > 1
+        assert local_domain_rank is not None
+        assert 0 <= local_domain_rank <= domain_rank < domain_count
+
+        if vllm_config.kv_transfer_config is not None:
+            # modify the engine_id and append the local_domain_rank to it to ensure
+            # that the kv_transfer_config is unique for each domain rank.
+            vllm_config.kv_transfer_config.engine_id = (
+                f"{vllm_config.kv_transfer_config.engine_id}_dp{local_domain_rank}"
+            )
+            logger.debug(
+                "Setting kv_transfer_config.engine_id to %s",
+                vllm_config.kv_transfer_config.engine_id,
+            )
+            
+        self.domain_rank = domain_rank
+        logger.info(f"Domain rank: {self.domain_rank} start to init statelss domain group")
+        self.domain_group = vllm_config.parallel_config.stateless_init_domain_group()
+
+        """
+        AoChen: For reusing busy loop, so we assign domain_rank to self.dp_rank
+                Do not use self.dp_rank somewhere else !!!
+        """
+        self.dp_rank = domain_rank
+
+    def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
+        # Optimization - only perform finish-sync all-reduce every 32 steps.
+        self.step_counter += 1
+        if self.step_counter % 32 != 0:
+            return True
+
+        return ParallelConfig.has_unfinished_dp(self.domain_group, local_unfinished)
 
 
 class DPEngineCoreActor(DPEngineCoreProc):

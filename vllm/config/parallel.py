@@ -354,6 +354,40 @@ class ParallelConfig:
 
         return answer
 
+    def stateless_init_domain_group(self) -> ProcessGroup:
+        from torch.distributed import DistNetworkError
+
+        from vllm.distributed.utils import (
+            stateless_init_torch_distributed_process_group,
+        )
+
+        max_retries = 5
+        last_exc: Exception | None = None
+        for _ in range(max_retries):
+            try:
+                # use gloo since the engine process might not have cuda device
+                logger.info(f"Initializing domain group for rank {self.domain_parallel_rank} with size {self.data_parallel_size // self.dp_per_domain}")
+                return stateless_init_torch_distributed_process_group(
+                    self.data_parallel_master_ip,
+                    self.get_next_dp_init_port(),
+                    self.domain_parallel_rank,
+                    self.data_parallel_size // self.dp_per_domain,
+                    backend=current_platform.dist_backend,
+                )
+            except DistNetworkError as e:
+                # We only want to retry when the root cause is EADDRINUSE.
+                if "EADDRINUSE" in str(e):
+                    logger.warning("Address already in use. Retrying with a new port.")
+                    last_exc = e
+                    continue  # try again with a new port
+                raise e
+
+        # If we get here all retries have failed.
+        assert last_exc is not None
+        raise last_exc
+
+
+
     def stateless_init_dp_group(self) -> ProcessGroup:
         # NOTE: In high-concurrency scenarios multiple processes
         # can pick the same (currently free) port through a race
@@ -492,6 +526,8 @@ class ParallelConfig:
             "worker_extension_cls",
             "_api_process_count",
             "_api_process_rank",
+            "domain_parallel_rank",
+            "domain_parallel_rank_local",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors

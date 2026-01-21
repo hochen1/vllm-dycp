@@ -201,7 +201,7 @@ class WorkerWrapperBase:
         self.rpc_rank = rpc_rank
         self.global_rank = self.rpc_rank if global_rank is None else global_rank
         self.worker: WorkerBase | None = None
-
+        logger.info(f"WorkerWrapperBase rpc_rank: {self.rpc_rank}, global_rank: {self.global_rank}")
         # do not store this `vllm_config`, `init_worker` will set the final
         # one.
         # TODO: investigate if we can remove this field in `WorkerWrapperBase`,

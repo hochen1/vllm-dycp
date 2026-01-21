@@ -26,7 +26,7 @@ vllm serve ${MODEL_PATH} \
     --no-enable-prefix-caching \
     --data-parallel-size 4 \
     --tensor-parallel-size 1 \
-    --dp-per-domain 2 \
+    --dp-per-domain 4 \
     --block-size 64 \
     --cp-kv-cache-interleave-size 64 \
     --no-enforce-eager \

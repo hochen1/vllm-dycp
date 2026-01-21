@@ -939,8 +939,10 @@ def wait_for_engine_startup(
     if coord_process is not None:
         poller.register(coord_process.sentinel, zmq.POLLIN)
     while any(conn_pending) or any(start_pending):
+        print(f"conn_pending: {conn_pending}, start_pending: {start_pending}", flush=True)
         events = poller.poll(STARTUP_POLL_PERIOD_MS)
         if not events:
+            print(f"no events", flush=True)
             if any(conn_pending):
                 logger.debug(
                     "Waiting for %d local, %d remote core engine proc(s) to connect.",
@@ -964,8 +966,10 @@ def wait_for_engine_startup(
             )
 
         # Receive HELLO and READY messages from the input socket.
+        print(f"receive handshake message", flush=True)
         eng_identity, ready_msg_bytes = handshake_socket.recv_multipart()
         eng_index = int.from_bytes(eng_identity, "little")
+        print(f"eng_identity: {eng_identity}, eng_index: {eng_index}", flush=True)
         engine = next((e for e in core_engines if e.identity == eng_identity), None)
         if engine is None:
             raise RuntimeError(
@@ -997,6 +1001,7 @@ def wait_for_engine_startup(
                 )
 
         if status == "HELLO" and engine.state == CoreEngineState.NEW:
+            print(f"send init message with addresses: {addresses}", flush=True)
             # Send init message with DP config info and config hash.
             # The config hash ensures all DP workers have compatible configs.
             init_message = msgspec.msgpack.encode(
@@ -1038,6 +1043,7 @@ def wait_for_engine_startup(
             if parallel_config.data_parallel_size > 1:
                 worker_config_hash = msg.get("parallel_config_hash")
                 expected_hash = parallel_config.compute_hash()
+                print(f"wait engine core parallel_config: {parallel_config}", flush=True)
                 if worker_config_hash != expected_hash:
                     raise RuntimeError(
                         f"Configuration mismatch detected for engine "
@@ -1273,7 +1279,10 @@ def launch_domain_core_engines(
         local_handshake_address, zmq.ROUTER, bind=True
     ) as handshake_socket:
         from vllm.v1.engine.core import EngineCoreProc
-
+        print(f"local_handshake_address: {local_handshake_address}", flush=True)
+        print(f"handshake_address: {handshake_address}", flush=True)
+        print(f"client_handshake_address: {client_handshake_address}", flush=True)
+        print(f"handshake_socket: {handshake_socket}", flush=True)
         # Start local engines.
         if local_engine_count:
             local_engine_manager = DomainCoreEngineProcManager(

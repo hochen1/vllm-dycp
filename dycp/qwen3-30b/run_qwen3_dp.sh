@@ -24,8 +24,8 @@ vllm serve ${MODEL_PATH} \
     --max-num-batched-tokens 16384 \
     --gpu-memory-utilization 0.80 \
     --no-enable-prefix-caching \
-    --data-parallel-size 2 \
-    --tensor-parallel-size 2 \
+    --data-parallel-size 4 \
+    --tensor-parallel-size 1 \
     --block-size 64 \
     --cp-kv-cache-interleave-size 64 \
     --no-enforce-eager \
@@ -47,8 +47,8 @@ vllm serve ${MODEL_PATH} \
                     "tp_size": 16
              },
              "decode": {
-                    "dp_size": 2,
-                    "tp_size": 2
+                    "dp_size": 4,
+                    "tp_size": 1
              }
         }
     }'
