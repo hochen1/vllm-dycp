@@ -680,11 +680,6 @@ class CrossDPScheduler(Scheduler):
                     if selected_dp is None:
                         break
                 
-                if len(selected_dp) > 1:
-                    logger.info(f"It's a cp req, selected_dp: {selected_dp}, request id: {request.request_id}")
-                else:
-                    logger.info(f"It's a short req, selected_dp: {selected_dp}, request id: {request.request_id}")
-
                 # KVTransfer: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                     is_ready = self._update_waiting_for_remote_kv(request)
