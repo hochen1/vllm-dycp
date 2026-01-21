@@ -183,8 +183,8 @@ class CrossDPKVCacheCoordinatorNoPrefixCache:
         num_tokens: int,
         new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
         num_encoder_tokens: int,
-    ) -> int:
-        total_blocks = 0
+    ) -> list[int]:
+        block_list = []
         num_kv_cache_groups = len(self.kv_cache_config.kv_cache_groups)
         
         results = self._avg_distribute_tokens_to_ranks(len(cp_ranks), num_tokens)
@@ -197,11 +197,11 @@ class CrossDPKVCacheCoordinatorNoPrefixCache:
 
             for i in range(num_kv_cache_groups):
 
-                total_blocks += rank_manager[i].get_num_blocks_to_allocate(
+                block_list.append(rank_manager[i].get_num_blocks_to_allocate(
                     request_id, results[id], new_computed_blocks[i]
-                )
+                ))
 
-        return total_blocks
+        return block_list
 
     def save_new_computed_blocks(
         self, request_id: str, new_computed_blocks: tuple[Sequence[KVCacheBlock], ...]
@@ -423,9 +423,10 @@ class CrossDPKVCacheManager:
         )
 
         # This condition should be rewrite later for fine grained corss dp block allocation
-        if all([num_blocks_to_allocate > block_pool.get_num_free_blocks() for block_pool in self.block_pools]):
-            # Cannot allocate new blocks
-            return None
+        for idx, rank in enumerate(cp_ranks):
+            block_pool = self.block_pools[rank]
+            if num_blocks_to_allocate[idx] > block_pool.get_num_free_blocks():
+                return None
 
     
         assert not any(new_computed_block_list), (
