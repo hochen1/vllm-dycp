@@ -213,7 +213,9 @@ class SchedulerOutput:
     cp_rank: int = 0
     
     num_cp_request: int = 0
-    
+
+    none_tokens_in_peer_sched: bool = False
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(

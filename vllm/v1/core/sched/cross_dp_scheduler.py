@@ -942,10 +942,14 @@ class CrossDPScheduler(Scheduler):
 
         total_scheduler_output = []
 
+        none_tokens_in_peer_sched = all([sum(num_scheduled_tokens[idx].values()) == 0 for idx in range(self.cp_world_size)])
+
         for idx in range(self.cp_world_size):
             
             if sum(num_scheduled_tokens[idx].values()) == 0 and len(preempted_reqs[idx]) == 0 and len(self.finished_req_ids[idx]) == 0:
-                total_scheduler_output.append(SchedulerOutput.make_empty())
+                scheduler_output = SchedulerOutput.make_empty()
+                scheduler_output.none_tokens_in_peer_sched = none_tokens_in_peer_sched
+                total_scheduler_output.append(scheduler_output)
             else:
                 total_scheduler_output.append(
                     SchedulerOutput(
@@ -965,7 +969,8 @@ class CrossDPScheduler(Scheduler):
                         free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
                         cp_rank=idx,
                         cp_rank_scheduled_tokens=cp_rank_scheduled_tokens[idx],
-                        num_cp_request=sum([1 if cp_size > 1 else 0 for cp_size in  cp_rank_scheduled_tokens[idx].values()])
+                        num_cp_request=sum([1 if cp_size > 1 else 0 for cp_size in  cp_rank_scheduled_tokens[idx].values()]),
+                        none_tokens_in_peer_sched=none_tokens_in_peer_sched
                     )
                 )
         # NOTE(Kuntai): this function is designed for multiple purposes:
