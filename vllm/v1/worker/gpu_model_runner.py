@@ -2994,9 +2994,8 @@ class GPUModelRunner(
 
                 if not num_scheduled_tokens:
                     if (
-                        (self.parallel_config.distributed_executor_backend
-                        == "external_launcher" or self.parallel_config.dp_per_domain > 1
-                        )
+                        self.parallel_config.distributed_executor_backend
+                        == "external_launcher"
                         and self.parallel_config.data_parallel_size > 1
                     ):
                         # this is a corner case when both external launcher
