@@ -493,9 +493,16 @@ class DomainMultiprocExecutor(MultiprocExecutor):
         try:
             dp_start_rank = self.parallel_config.domain_parallel_rank * dp_per_domain
             local_dp_start_rank = self.parallel_config.domain_parallel_rank_local * dp_per_domain
+            """
+            AOCHEN: global_start_rank = self.local_world_size * node_rank_within_domain
+            but now, doamin can't support cross multi-node, so node_rank_within_domain is always 0
+            """
             global_start_rank = (
-                dp_start_rank * per_dp_size
+                # dp_start_rank * per_dp_size
+                self.local_world_size * self.parallel_config.node_rank_within_domain
             )
+            assert self.parallel_config.node_rank_within_domain == 0, "Note that DomainMultiprocExecutor can't support cross multi-node now"
+            # local_world_size is dp_per_domain * gpu per DP represents the number of workers per domain(EngineCore)
             for local_rank in range(self.local_world_size):
                 global_rank = global_start_rank + local_rank
                 dp_rank = dp_start_rank + local_rank // per_dp_size
