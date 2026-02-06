@@ -245,6 +245,8 @@ if TYPE_CHECKING:
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool = False
     VLLM_USE_FORCE_LOAD_BLANCE: bool = False
+    # vllm/v1/attention/backends/mla/common.py:1965 has a tensor palceholder for mla which is unnecessary for decode instance
+    VLLM_IGNORE_TENSOR_PLACEHOLDER: bool = False
 
 
 def get_default_cache_root():
