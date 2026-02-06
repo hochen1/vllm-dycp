@@ -723,6 +723,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self.dycp_rank,
                 self.cp_kv_cache_interleave_size,
             )
+            max_seq_len = seq_lens_cpu.max().item()
 
         seq_lens_np = seq_lens_cpu.numpy()
         num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
