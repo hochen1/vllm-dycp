@@ -891,7 +891,7 @@ class CrossDPScheduler(Scheduler):
         TODO(AoChen): total_num_scheduled_tokens scheduling constraints are not implemented yet.
         """
         total_num_scheduled_tokens = sum([sum(scheduled_tokens.values()) for scheduled_tokens in num_scheduled_tokens])
-        assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
+        assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens * self.cp_world_size
 
         assert token_budget >= 0
         assert len(self.running) <= (
