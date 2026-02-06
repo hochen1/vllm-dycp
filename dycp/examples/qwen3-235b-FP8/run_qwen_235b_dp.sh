@@ -40,7 +40,7 @@ export COMMON_ARGS="
 
 export VLLM_VERSION=0.13.0
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=380
-export VLLM_ATTENTION_BACKEND=FLASHMLA
+export VLLM_ATTENTION_BACKEND=FLASHINFER
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 
 # Profiler setttings
@@ -53,29 +53,29 @@ export PYTORCH_ALLOC_CONF=expandable_segments:True
 export VLLM_USE_FORCE_LOAD_BLANCE=1
 # ========== config vllm ==========
 args=(
-    --port 8400 \
-    ${EXTRA_PARAMS} \
-    $COMMON_ARGS \
-    --async-scheduling \
-    --distributed-executor-backend mp \
-    --hf-overrides '{"rope_parameters": {"rope_type":"yarn","factor":8.0,"original_max_position_embeddings":131072}}' \
-    --max-model-len 1048576 \
-    --max-num-batched-tokens 128 \
-    --gpu-memory-utilization 0.9 \
-    --no-enable-prefix-caching \
-    --data-parallel-size 16 \
-    --tensor-parallel-size 1 \
-    --data-parallel-size-local 8 \
-    --data-parallel-address=< Master IP Address> \
-    --data-parallel-rpc-port 8400 \
-    --data-parallel-start-rank $((NODE_RANK * 8)) \
-    --block-size 64 \
-    --cp-kv-cache-interleave-size 64 \
-    --no-enforce-eager \
-    --max-num-seqs ${MAX_SEQS_PER_DP} \
-    --enable-expert-parallel \
-    --compilation-config '{"cudagraph_capture_sizes":[2, 4, 8, 10, 12, 16, 18, 24, 26, 32, 34, 64], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --kv-transfer-config \
+    --port 8400 
+    ${EXTRA_PARAMS} 
+    $COMMON_ARGS 
+    --async-scheduling 
+    --distributed-executor-backend mp 
+    --hf-overrides '{"rope_parameters": {"rope_type":"yarn","factor":8.0,"original_max_position_embeddings":262144}}' 
+    --max-model-len 2097152 
+    --max-num-batched-tokens 128 
+    --gpu-memory-utilization 0.9 
+    --no-enable-prefix-caching 
+    --data-parallel-size 4 
+    --tensor-parallel-size 4 
+    --data-parallel-size-local 2 
+    --data-parallel-address=< Master IP Address> 
+    --data-parallel-rpc-port 8400 
+    --data-parallel-start-rank $((NODE_RANK * 2)) 
+    --block-size 64 
+    --cp-kv-cache-interleave-size 64 
+    --no-enforce-eager 
+    --max-num-seqs ${MAX_SEQS_PER_DP} 
+    --enable-expert-parallel 
+    --compilation-config '{"cudagraph_capture_sizes":[2, 4, 8, 10, 12, 16, 18, 24, 26, 32, 34, 64], "cudagraph_mode": "FULL_DECODE_ONLY"}' 
+    --kv-transfer-config 
     '{
         "kv_connector": "ExampleConnector",
         "kv_connector_module_path": "vllm.distributed.kv_transfer.kv_connector.v1.example_connector",
@@ -90,8 +90,8 @@ args=(
                     "tp_size": 16
              },
              "decode": {
-                    "dp_size": 8,
-                    "tp_size": 1
+                    "dp_size": 2,
+                    "tp_size": 4
              }
         }
     }'

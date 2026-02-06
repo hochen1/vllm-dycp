@@ -51,34 +51,33 @@ export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 export VLLM_USE_FORCE_LOAD_BLANCE=1
-
-
-vllm serve ${MODEL_PATH} \
-    --port 8400 \
-    ${EXTRA_PARAMS} \
-    $COMMON_ARGS \
-    --async-scheduling \
-    --distributed-executor-backend dmp \
-    --hf-overrides '{"rope_parameters": {"rope_type":"yarn","factor":8.0,"original_max_position_embeddings":131072}}' \
-    --max-model-len 1048576 \
-    --max-num-batched-tokens 128 \
-    --gpu-memory-utilization 0.9 \
-    --no-enable-prefix-caching \
-    --data-parallel-size 16 \
-    --tensor-parallel-size 1 \
-    --data-parallel-size-local 8 \
-    --data-parallel-address=< Master IP Address> \
-    --data-parallel-rpc-port 8400 \
-    --data-parallel-start-rank $((NODE_RANK * 2)) \
-    --block-size 64 \
-    --cp-kv-cache-interleave-size 64 \
-    --no-enforce-eager \
-    --max-num-seqs ${MAX_SEQS_PER_DP} \
-    --enable-expert-parallel \
-    --dp-per-domain 8 \
-    --num-cp-seqs 2 \
-    --compilation-config '{"cudagraph_capture_sizes":[2, 4, 8, 10, 12, 16, 18, 24, 26, 32, 34, 64], "cudagraph_mode": "FULL_DECODE_ONLY"}, "cudagraph_capture_sizes_for_cp": 2}' \
-    --kv-transfer-config \
+# ========== config vllm ==========
+args=(
+    --port 8400 
+    ${EXTRA_PARAMS} 
+    $COMMON_ARGS 
+    --async-scheduling 
+    --distributed-executor-backend dmp 
+    --hf-overrides '{"rope_parameters": {"rope_type":"yarn","factor":8.0,"original_max_position_embeddings":131072}}' 
+    --max-model-len 1048576 
+    --max-num-batched-tokens 128 
+    --gpu-memory-utilization 0.9 
+    --no-enable-prefix-caching 
+    --data-parallel-size 16 
+    --tensor-parallel-size 1 
+    --data-parallel-size-local 8 
+    --data-parallel-address=< Master IP Address> 
+    --data-parallel-rpc-port 8400 
+    --data-parallel-start-rank $((NODE_RANK * 8)) 
+    --block-size 64 
+    --cp-kv-cache-interleave-size 64 
+    --no-enforce-eager 
+    --max-num-seqs ${MAX_SEQS_PER_DP} 
+    --enable-expert-parallel 
+    --dp-per-domain 8 
+    --num-cp-seqs 2 
+    --compilation-config '{"cudagraph_capture_sizes":[2, 4, 8, 10, 12, 16, 18, 24, 26, 32, 34, 64], "cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes_for_cp": 2}' 
+    --kv-transfer-config 
     '{
         "kv_connector": "CrossDPExampleConnector",
         "kv_connector_module_path": "vllm.distributed.kv_transfer.kv_connector.v1.cross_dp_example_connector",
@@ -97,4 +96,8 @@ vllm serve ${MODEL_PATH} \
                     "tp_size": 1
              }
         }
-    }'  &> ${NODE_RANK}dp.log &
+    }'
+)
+
+# ========== execute vllm server ==========
+vllm serve "${MODEL_PATH}" "${args[@]}" &> "${NODE_RANK}dycp.log" &
