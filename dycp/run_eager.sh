@@ -35,7 +35,7 @@ vllm serve ${MODEL_PATH} \
     --kv-transfer-config \
     '{
         "kv_connector": "CrossDPExampleConnector",
-    "kv_connector_module_path": "vllm.distributed.kv_transfer.kv_connector.v1.cross_dp_example_connector",
+        "kv_connector_module_path": "vllm.distributed.kv_transfer.kv_connector.v1.cross_dp_example_connector",
         "kv_role": "kv_consumer",
         "kv_parallel_size": 2,
         "kv_port": "20002",
