@@ -19,6 +19,7 @@ EXTRA_PARAMS=$([ $NODE_RANK -ne 0 ] && echo "--headless" || echo "--api-server-c
 # export CUDA_LAUNCH_BLOCKING=1
 
 # max graph size should <= max_num_seqs for decode with cudagraph
+# In dycp MAX_SEQS_PER_DP represents Seqs per DP.
 MAX_SEQS_PER_DP=64
 export VLLM_MOE_DP_CHUNK_SIZE=${MAX_SEQS_PER_DP}
 export VLLM_DEEPEP_BUFFER_SIZE_MB=0
@@ -59,7 +60,7 @@ args=(
     --async-scheduling 
     --distributed-executor-backend dmp 
     --hf-overrides '{"rope_parameters": {"rope_type":"yarn","factor":8.0,"original_max_position_embeddings":131072}}' 
-    --max-model-len 1048576 
+    --max-model-len 524288 
     --max-num-batched-tokens 128 
     --gpu-memory-utilization 0.9 
     --no-enable-prefix-caching 

@@ -20,7 +20,7 @@ export VLLM_USE_FORCE_LOAD_BLANCE=1
 export VLLM_ALL2ALL_BACKEND=allgather_reducescatter
 
 # max graph size should <= max_num_seqs for decode with cudagraph
-MAX_SEQS_PER_DP=128
+MAX_SEQS_PER_DP=128*2
 
 # ========== config vllm ==========
 args=(
@@ -28,8 +28,8 @@ args=(
     $COMMON_ARGS 
     --distributed-executor-backend mp 
     --hf-overrides '{"rope_parameters": {"rope_type":"yarn","factor":8.0,"original_max_position_embeddings":40960}}' 
-    --max-model-len 163840 
-    --max-num-batched-tokens 16384 
+    --max-model-len 327680 
+    --max-num-batched-tokens 4096 
     --gpu-memory-utilization 0.80 
     --no-enable-prefix-caching 
     --data-parallel-size 1 
@@ -40,7 +40,7 @@ args=(
     --no-enforce-eager 
     --max-num-seqs ${MAX_SEQS_PER_DP}
     --enable-expert-parallel 
-    --compilation-config '{"cudagraph_capture_sizes":[2, 4, 8, 16, 32, 64, 128], "cudagraph_mode": "FULL_DECODE_ONLY"}' 
+    --compilation-config '{"cudagraph_capture_sizes":[2, 4, 8, 16, 32, 64, 128, 256], "cudagraph_mode": "FULL_DECODE_ONLY"}' 
     --kv-transfer-config 
     '{
         "kv_connector": "ExampleConnector",

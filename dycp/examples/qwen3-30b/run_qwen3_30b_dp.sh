@@ -27,8 +27,8 @@ args=(
     --async-scheduling 
     --distributed-executor-backend mp 
     --hf-overrides '{"rope_parameters": {"rope_type":"yarn","factor":8.0,"original_max_position_embeddings":40960}}' 
-    --max-model-len 163840 
-    --max-num-batched-tokens 16384 
+    --max-model-len 327680 
+    --max-num-batched-tokens 4096 
     --gpu-memory-utilization 0.80 
     --no-enable-prefix-caching 
     --data-parallel-size 2 

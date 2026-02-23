@@ -35,8 +35,8 @@ args=(
     $COMMON_ARGS 
     --distributed-executor-backend mp 
     --hf-overrides '{"rope_parameters": {"rope_type":"yarn","factor":8.0,"original_max_position_embeddings":163840}}' 
-    --max-model-len 1310720 
-    --max-num-batched-tokens 4096 
+    --max-model-len 1048576 
+    --max-num-batched-tokens 256 
     --gpu-memory-utilization 0.8 
     --no-enable-prefix-caching 
     --data-parallel-size 8 
