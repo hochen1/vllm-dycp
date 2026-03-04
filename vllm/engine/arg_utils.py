@@ -41,6 +41,7 @@ from vllm.config import (
     DeviceConfig,
     ECTransferConfig,
     EPLBConfig,
+    Finegrainedtp,
     KVEventsConfig,
     KVTransferConfig,
     LoadConfig,
@@ -572,6 +573,9 @@ class EngineArgs:
         CacheConfig.kv_offloading_backend
     )
     tokens_only: bool = False
+
+    # fine-grained tensor parallelism config
+    fine_grained_tp_config: Finegrainedtp | None = None
 
     # domain parallel config
     dp_per_domain: int = ParallelConfig.dp_per_domain
@@ -1170,6 +1174,8 @@ class EngineArgs:
             "--optimization-level", **vllm_kwargs["optimization_level"]
         )
 
+        vllm_group.add_argument("--fine-grained-tp-config", **vllm_kwargs["fine_grained_tp_config"])
+
         # Other arguments
         parser.add_argument(
             "--disable-log-stats",
@@ -1728,6 +1734,7 @@ class EngineArgs:
             cache_config=cache_config,
             parallel_config=parallel_config,
             scheduler_config=scheduler_config,
+            fine_grained_tp_config=self.fine_grained_tp_config,
             device_config=device_config,
             load_config=load_config,
             attention_config=attention_config,

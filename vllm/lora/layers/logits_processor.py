@@ -3,9 +3,11 @@
 
 
 import torch
+from vllm.config import get_current_vllm_config
 import torch.nn as nn
 from transformers import PretrainedConfig
 
+from vllm.distributed.parallel_state import get_lmhead_tp_group
 from vllm.config.lora import LoRAConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
@@ -145,47 +147,46 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         self,
         hidden_states: torch.Tensor,
         lm_head: VocabParallelEmbedding,
-        embedding_bias: torch.Tensor | None = None,
+        embedding_bias: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        if get_current_vllm_config().fine_grained_tp_config.lmhead_tensor_parallel_size > 1:
+            return self._get_logits_lmheadtp(hidden_states, lm_head, embedding_bias)
+        else:
+            return self._get_logits_normal(hidden_states, lm_head, embedding_bias)
+
+    def _get_logits_lmheadtp(
+        self,
+        hidden_states: torch.Tensor,
+        lm_head: VocabParallelEmbedding,
+        embedding_bias: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        # Gather hidden states from all devices in tensor parallel group
+        gathered_hidden_states = get_lmhead_tp_group().all_gather(hidden_states, dim=0)
+        local_logits = lm_head.quant_method.apply(
+            lm_head, gathered_hidden_states, bias=embedding_bias
+        )
+        # Gather logits for tensor parallel
+        logits = get_lmhead_tp_group().all_to_all(local_logits)
+        # Remove paddings in vocab (if any)
+        if logits is not None:
+            logits = logits[..., : self.org_vocab_size]
+        return logits
+
+    def _get_logits_normal(
+        self,
+        hidden_states: torch.Tensor,
+        lm_head: VocabParallelEmbedding,
+        embedding_bias: torch.Tensor | None,
     ) -> torch.Tensor | None:
         # Get the logits for the next tokens.
-        logits = lm_head.quant_method.apply(lm_head, hidden_states)
-        if embedding_bias is not None:
-            logits += embedding_bias
+        logits = lm_head.quant_method.apply(lm_head, hidden_states, bias=embedding_bias)
 
         # Gather logits for TP
-        logits = self.base_layer._gather_logits(logits)
-
-        if logits is None:
-            return None
-
-        if self.sharded_to_full_mapping_gpu is not None:
-            # Reindex full logits tensor to ensure 1:1 mapping between
-            # index and token_id
-            # Example for:
-            #   org_vocab_size = 4
-            #   added_vocab_size = 2
-            #   pad_to_size = 8
-            #   tp_size = 2
-
-            # indices:  [0, 1, 2,  3, 4, 5, 6,  7]
-            # token_id: [0, 1, 4, -1, 2, 3, 5, -1]
-
-            # Therefore, the mapping is expected to be:
-            # [0, 1, 4, 6, 2, 3, 5, 7] so that when we reindex,
-            # we get:
-            # indices:  [0, 1, 2, 3, 4, 5,  6,  7]
-            # token_id: [0, 1, 2, 3, 4, 5, -1, -1]
-            logits = logits[:, self.sharded_to_full_mapping_gpu]
-
-        lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_logits(
-            logits, hidden_states, self.lora_a_stacked, self.lora_b_stacked, 1.0
-        )
-
-        if not current_platform.can_update_inplace():
-            logits = lora_output
+        logits = self._gather_logits(logits)
 
         # Remove paddings in vocab (if any).
-        logits = logits[:, : self.base_layer.vocab_size]
+        if logits is not None:
+            logits = logits[..., : self.org_vocab_size]
         return logits
 
     def forward(self, *args, **kwargs):

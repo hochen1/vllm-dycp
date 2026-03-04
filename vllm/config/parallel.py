@@ -715,3 +715,13 @@ class ParallelConfig:
             )
 
         return self
+
+@config
+@dataclass
+class Finegrainedtp:
+    """fine-grained-tp config"""
+
+    oproj_tensor_parallel_size: int = 1
+    lmhead_tensor_parallel_size: int = 1
+    embedding_tensor_parallel_size: int = 1
+    mlp_tensor_parallel_size: int = 1

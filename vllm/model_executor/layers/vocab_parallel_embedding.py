@@ -8,12 +8,14 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter, UninitializedParameter
 
-from vllm.distributed import (
-    divide,
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
+from vllm.config import get_current_vllm_config
+from vllm.distributed import divide, tensor_model_parallel_all_reduce
+from vllm.distributed.parallel_state import (
+    get_embed_tp_group,
+    get_lmhead_tp_group,
+    get_tp_group,
 )
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -234,8 +236,26 @@ class VocabParallelEmbedding(CustomOp):
         super().__init__()
 
         # Keep the input dimensions.
-        tp_rank = get_tensor_model_parallel_rank()
-        self.tp_size = get_tensor_model_parallel_world_size()
+        self.enable_lmhead_tp = (
+            get_current_vllm_config().fine_grained_tp_config.lmhead_tensor_parallel_size > 1
+        )
+        self.enable_embedding_tp = (
+            get_current_vllm_config().fine_grained_tp_config.embedding_tensor_parallel_size > 1
+        )
+
+        if self.enable_lmhead_tp and "head" in prefix:
+            self.comm_group = get_lmhead_tp_group()
+        elif self.enable_embedding_tp and "embed_tokens" in prefix:
+            self.comm_group = get_embed_tp_group()
+            self.enable_enfore_eager = (
+                get_current_vllm_config().model_config is not None
+                and get_current_vllm_config().model_config.enforce_eager
+            )
+        else:
+            self.comm_group = get_tp_group()
+
+        self.tp_size = self.comm_group.world_size
+        self.tp_rank = self.comm_group.rank_in_group
         self.num_embeddings = num_embeddings
         self.padding_size = padding_size
         self.org_vocab_size = org_num_embeddings or num_embeddings
@@ -253,7 +273,7 @@ class VocabParallelEmbedding(CustomOp):
             self.org_vocab_size_padded,
             self.num_embeddings,
             self.org_vocab_size,
-            tp_rank,
+            self.tp_rank,
             self.tp_size,
         )
         self.embedding_dim = embedding_dim
@@ -479,8 +499,46 @@ class VocabParallelEmbedding(CustomOp):
         # Reduce across all the model parallel GPUs.
         output = tensor_model_parallel_all_reduce(output_parallel)
         return output
+    
+    def forward_embedding_tp(self, input_):
+        max_tokens_across_dp = (
+            get_forward_context().dp_metadata.max_tokens_across_dp_cpu
+        )
+        original_input_size = input_.shape[0]
+
+        if self.enable_enfore_eager:
+            # Pad input_ to max_tokens_across_dp before all_gather
+            padding_size = max_tokens_across_dp - original_input_size
+            if padding_size > 0:
+                input_ = torch.nn.functional.pad(
+                    input_, (0, padding_size), mode="constant", value=0
+                )
+
+        complete_input = self.comm_group.all_gather(input_, dim=0)
+        masked_input, input_mask = get_masked_input_and_mask(
+            complete_input,
+            self.shard_indices.org_vocab_start_index,
+            self.shard_indices.org_vocab_end_index,
+            self.shard_indices.num_org_vocab_padding,
+            self.shard_indices.added_vocab_start_index,
+            self.shard_indices.added_vocab_end_index,
+        )
+        # Get the embeddings.
+        output_parallel = self.quant_method.embedding(self, masked_input.long())
+        output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
+        output = self.comm_group.reduce_scatter(output_parallel, dim=0)
+
+        if self.enable_enfore_eager:
+            # Unpad output back to original size
+            output = output[:original_input_size]
+
+        output = output.view(original_input_size, -1)
+
+        return output
 
     def forward_cuda(self, input_):
+        if self.enable_embedding_tp:
+            return self.forward_embedding_tp(input_)
         return self.forward_native(input_)
 
     def extra_repr(self) -> str:

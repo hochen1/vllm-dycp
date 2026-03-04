@@ -1119,6 +1119,31 @@ def get_pcp_group() -> GroupCoordinator:
     assert _PCP is not None, "prefill context parallel group is not initialized"
     return _PCP
 
+# Module specific tensor parallel groups
+_MLP_TP: GroupCoordinator | None = None
+_OTP: GroupCoordinator | None = None
+_LMTP: GroupCoordinator | None = None
+_EMBED_TP: GroupCoordinator | None = None
+
+
+def get_mlp_tp_group() -> GroupCoordinator:
+    assert _MLP_TP is not None, "mlp group is not initialized"
+    return _MLP_TP
+
+
+def get_otp_group() -> GroupCoordinator:
+    assert _OTP is not None, "output tensor parallel group is not initialized"
+    return _OTP
+
+
+def get_lmhead_tp_group() -> GroupCoordinator:
+    assert _LMTP is not None, "lm head tensor parallel group is not initialized"
+    return _LMTP
+
+
+def get_embed_tp_group() -> GroupCoordinator:
+    assert _EMBED_TP is not None, "emtp group is not initialized"
+    return _EMBED_TP
 
 _DYCP: GroupCoordinator | None = None
 
@@ -1428,6 +1453,62 @@ def initialize_model_parallel(
         group_ranks, get_world_group().local_rank, backend, group_name="ep"
     )
 
+    # Initialize fine-grained TP process groups on Ascend for four components:
+    # 1. LM Head: output logits projection (`lmhead_tensor_parallel_size`)
+    # 2. O Proj: attention output projection (`oproj_tensor_parallel_size`)
+    # 3. Embedding: The token embedding table at the input of the model (`embedding_tensor_parallel_size`)
+    # 4. MLP: feed-forward network in transformer blocks (`mlp_tensor_parallel_size`)
+    _group_cache = {}
+
+    def _create_or_get_group(group_size: int, group_name: str) -> GroupCoordinator:
+        if group_size is None:
+            return None
+        if group_size not in _group_cache:
+            rank_grid = torch.arange(world_size).reshape(
+                pipeline_model_parallel_size,
+                data_parallel_size,
+                tensor_model_parallel_size,
+            )
+            num_chunks = data_parallel_size // group_size
+            group_ranks = []
+            for pp_idx in range(pipeline_model_parallel_size):
+                stage_ranks = rank_grid[pp_idx]  # (dp, tp)
+                for chunk in range(num_chunks):
+                    for tp_idx in range(tensor_model_parallel_size):
+                        group = stage_ranks[
+                            chunk * group_size : (chunk + 1) * group_size, tp_idx
+                        ].tolist()
+                        group_ranks.append(group)
+            pg = init_model_parallel_group(
+                group_ranks,
+                get_world_group().local_rank,
+                backend,
+                group_name=group_name,
+            )
+            _group_cache[group_size] = pg
+
+        return _group_cache[group_size]
+
+    otp_size = get_current_vllm_config().fine_grained_tp_config.oproj_tensor_parallel_size
+    lmhead_tp_size = (
+        get_current_vllm_config().fine_grained_tp_config.lmhead_tensor_parallel_size
+    )
+    embedding_tp_size = (
+        get_current_vllm_config().fine_grained_tp_config.embedding_tensor_parallel_size
+    )
+    mlp_tp_size = get_current_vllm_config().fine_grained_tp_config.mlp_tensor_parallel_size
+
+    global _OTP, _LMTP, _EMBED_TP, _MLP_TP
+
+    if otp_size > 0:
+        _OTP = _create_or_get_group(otp_size, "otp")
+    if lmhead_tp_size > 0:
+        _LMTP = _create_or_get_group(lmhead_tp_size, "lmheadtp")
+    if embedding_tp_size > 0:
+        _EMBED_TP = _create_or_get_group(embedding_tp_size, "emtp")
+    if mlp_tp_size > 0:
+        _MLP_TP = _create_or_get_group(mlp_tp_size, "mlptp")
+
     logger.info_once(
         "rank %s in world size %s is assigned as "
         "DP rank %s, PP rank %s, PCP rank %s, "
@@ -1594,6 +1675,25 @@ def destroy_model_parallel():
         _EP.destroy()
     _EP = None
 
+    global _MLP_TP
+    if _MLP_TP:
+        _MLP_TP.destroy()
+    _MLP_TP = None
+
+    global _LMTP
+    if _LMTP:
+        _LMTP.destroy()
+    _LMTP = None
+
+    global _EMBED_TP
+    if _EMBED_TP:
+        _EMBED_TP.destroy()
+    _EMBED_TP = None
+
+    global _OTP
+    if _OTP:
+        _OTP.destroy()
+    _OTP = None
 
 def destroy_distributed_environment():
     global _WORLD, _NODE_COUNT

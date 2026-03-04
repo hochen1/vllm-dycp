@@ -22,7 +22,7 @@ from vllm.config.model import (
 )
 from vllm.config.multimodal import MultiModalConfig
 from vllm.config.observability import ObservabilityConfig
-from vllm.config.parallel import EPLBConfig, ParallelConfig
+from vllm.config.parallel import EPLBConfig, Finegrainedtp, ParallelConfig
 from vllm.config.pooler import PoolerConfig
 from vllm.config.profiler import ProfilerConfig
 from vllm.config.scheduler import SchedulerConfig
@@ -80,6 +80,7 @@ __all__ = [
     # From vllm.config.parallel
     "EPLBConfig",
     "ParallelConfig",
+    "Finegrainedtp",
     # From vllm.config.pooler
     "PoolerConfig",
     # From vllm.config.scheduler
