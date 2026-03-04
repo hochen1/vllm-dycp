@@ -50,7 +50,7 @@ export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 # export VLLM_TORCH_PROFILER_WITH_STACK=0
 
 export PYTORCH_ALLOC_CONF=expandable_segments:True
-export VLLM_USE_FORCE_LOAD_BLANCE=1
+export VLLM_USE_FORCE_LOAD_BALANCE=1
 # ========== config vllm ==========
 args=(
     --port 8400

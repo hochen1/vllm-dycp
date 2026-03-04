@@ -21,7 +21,7 @@ export VLLM_TORCH_PROFILER_DIR=${VLLM_TORCH_PROFILER_DIR:-"./profiles"}
 # mkdir -p $VLLM_TORCH_PROFILER_DIR
 # export VLLM_TORCH_PROFILER_WITH_STACK=0
 
-export VLLM_USE_FORCE_LOAD_BLANCE=1
+export VLLM_USE_FORCE_LOAD_BALANCE=1
 export VLLM_ALL2ALL_BACKEND=allgather_reducescatter
 
 # max graph size should <= max_num_seqs for decode with cudagraph
