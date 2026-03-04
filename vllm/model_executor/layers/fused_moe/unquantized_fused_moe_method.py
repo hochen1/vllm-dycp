@@ -300,7 +300,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             router_logits=router_logits,
         )
 
-        if envs.VLLM_USE_FORCE_LOAD_BALANCE:
+        if envs.VLLM_USE_FORCE_LOAD_BLANCE:
             random_matrix = torch.rand(topk_ids.size(0),
                                        layer.global_num_experts,
                                        device=topk_ids.device)

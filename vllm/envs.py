@@ -1569,8 +1569,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_USE_V2_MODEL_RUNNER", "0"))
     ),
     # Flag to enable force load balance.
-    "VLLM_USE_FORCE_LOAD_BALANCE": lambda: bool(
-        int(os.getenv("VLLM_USE_FORCE_LOAD_BALANCE", "0"))
+    "VLLM_USE_FORCE_LOAD_BLANCE": lambda: bool(
+        int(os.getenv("VLLM_USE_FORCE_LOAD_BLANCE", "0"))
     ),
     # vllm/v1/attention/backends/mla/common.py:1965 has a tensor palceholder for mla which is unnecessary for decode instance
     "VLLM_IGNORE_TENSOR_PLACEHOLDER": lambda: bool(
