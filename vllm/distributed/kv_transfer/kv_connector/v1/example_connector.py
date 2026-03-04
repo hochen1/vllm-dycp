@@ -118,7 +118,7 @@ class ExampleConnector(KVConnectorBase_V1):
             The number of elements in kv_caches and layer_names should be
             the same.
         """
-        return None
+        return
         attn_metadata = forward_context.attn_metadata
 
         def inject_kv_into_layer(
@@ -138,7 +138,6 @@ class ExampleConnector(KVConnectorBase_V1):
                 slot_mapping (torch.Tensor): the slot mapping. In shape
                     [num_tokens].
             """
-            return None
             dst_kv_cache_layer_shape = dst_kv_cache_layer.shape
             if isinstance(attn_metadata, MLACommonMetadata):
                 num_pages = dst_kv_cache_layer_shape[0]
@@ -216,6 +215,7 @@ class ExampleConnector(KVConnectorBase_V1):
         attn_metadata: AttentionMetadata,
         **kwargs: Any,
     ) -> None:
+        return
         """Start saving the KV cache of the layer from vLLM's paged buffer
         to the connector.
 
@@ -226,7 +226,6 @@ class ExampleConnector(KVConnectorBase_V1):
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
         """
-        return None
 
         def extract_kv_from_layer(
             layer: torch.Tensor,
@@ -275,7 +274,6 @@ class ExampleConnector(KVConnectorBase_V1):
             the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
         """
-        return len(request.prompt_token_ids) - 1, False
         # NOTE: in this debug implementation, we assume that the prompt is
         # cached_prompt + newly_generated_single_token
         # Therefore, we use prompt_token_ids[:-1] to determine the folder name
@@ -283,6 +281,7 @@ class ExampleConnector(KVConnectorBase_V1):
         # NOTE: in current v1 scheduler, the num_computed_tokens is aligned
         # with the block granularity. And it expects the returned blocks and
         # num_computed_tokens to also be aligned with the block granularity.
+        return len(request.prompt_token_ids) - 1, False
         if not self._found_match_for_request(request):
             return 0, False
 

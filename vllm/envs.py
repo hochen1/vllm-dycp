@@ -1572,6 +1572,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_FORCE_LOAD_BALANCE": lambda: bool(
         int(os.getenv("VLLM_USE_FORCE_LOAD_BALANCE", "0"))
     ),
+    # vllm/v1/attention/backends/mla/common.py:1965 has a tensor palceholder for mla which is unnecessary for decode instance
+    "VLLM_IGNORE_TENSOR_PLACEHOLDER": lambda: bool(
+        int(os.getenv("VLLM_IGNORE_TENSOR_PLACEHOLDER", "0"))
+    ),
 }
 
 # --8<-- [end:env-vars-definition]
