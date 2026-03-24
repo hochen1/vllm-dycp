@@ -1041,3 +1041,11 @@ class FusedMoEConfig:
             and has_flashinfer_cutlass_fused_moe()
             and envs.VLLM_FLASHINFER_MOE_BACKEND == "throughput"
         )
+
+    @property
+    def pcp_size(self):
+        return self.moe_parallel_config.pcp_size
+
+    @property
+    def pcp_rank(self):
+        return self.moe_parallel_config.pcp_rank
