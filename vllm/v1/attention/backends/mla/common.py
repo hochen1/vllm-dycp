@@ -229,7 +229,7 @@ from vllm.v1.attention.backends.utils import (
     get_pcp_kv_indices,
     get_pcp_query_indices,
     pcp_kv_allgather_and_restore,
-    get_dcp_local_seq_lens,
+    get_cp_local_seq_lens,
     get_per_layer_parameters,
     infer_global_hyperparameters,
     split_decodes_and_prefills,
@@ -817,8 +817,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
 
         num_computed_tokens_cpu = common_attn_metadata.seq_lens_cpu - query_seq_lens_cpu
-        dcp_local_seq_lens = common_attn_metadata.dcp_local_seq_lens
-        dcp_local_seq_lens_cpu = common_attn_metadata.dcp_local_seq_lens_cpu
 
         dycp_local_seq_lens = common_attn_metadata.dycp_local_seq_lens
         dycp_local_seq_lens_cpu = common_attn_metadata.dycp_local_seq_lens_cpu
@@ -1068,7 +1066,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         decode_metadata = None
         if num_decodes > 0:
-            dcp_tot_seq_lens_device = None
             cp_tot_seq_lens_device = None
             if self.cp_world_size > 1:
                 cp_tot_seq_lens_device = seq_lens[:num_decodes]
@@ -1410,10 +1407,27 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 and current_platform.get_device_capability()[0] == 9
             )
 
-        self.dcp_world_size: int | None = None
-        self.pcp_world_size: int | None = None
-        self.dcp_rank: int | None = None
-        self.pcp_rank: int | None = None
+        # self.dcp_world_size: int | None = None
+        # self.pcp_world_size: int | None = None
+        # self.dcp_rank: int | None = None
+        # self.pcp_rank: int | None = None
+        try:
+            from vllm.distributed.parallel_state import get_dcp_group
+
+            self.dcp_world_size = get_dcp_group().world_size
+            self.dcp_rank = get_dcp_group().rank_in_group
+        except AssertionError:
+            # DCP might not be initialized in testing
+            self.dcp_world_size = 1
+            self.dcp_rank = 0
+        try:
+            from vllm.distributed.parallel_state import get_pcp_group
+
+            self.pcp_world_size = get_pcp_group().world_size
+            self.pcp_rank = get_pcp_group().rank_in_group
+        except AssertionError:
+            self.pcp_world_size = 1
+            self.pcp_rank = 0
 
         self.chunked_prefill_workspace_size = (
             MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(

@@ -319,12 +319,11 @@ class GPUModelRunner(
         self.dcp_world_size = self.parallel_config.decode_context_parallel_size
         self.pcp_world_size = self.parallel_config.prefill_context_parallel_size
         self.pcp_rank = 0 if self.pcp_world_size <= 1 else get_pcp_group().rank_in_group
-        self.cp_rank = self.dcp_world_size * self.pcp_rank + self.dcp_rank
-        self.cp_world_size = self.dcp_world_size * self.pcp_world_size
         self.dcp_rank = 0 if self.dcp_world_size <= 1 else get_dcp_group().rank_in_group
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
-
+        self.cp_rank = self.dcp_world_size * self.pcp_rank + self.dcp_rank
+        self.cp_world_size = self.dcp_world_size * self.pcp_world_size
         self.dycp_world_size = self.parallel_config.dp_per_domain
         self.dycp_rank = 0 if self.dycp_world_size <= 1 else get_dycp_group().rank_in_group
 

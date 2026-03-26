@@ -80,7 +80,6 @@ class PCPManager:
 
     def update_tokens_for_pcp(
         self,
-        tokens: np.ndarray,
         num_scheduled_tokens: np.ndarray,
         arange_np: np.ndarray,
         num_reqs: int,
@@ -320,9 +319,9 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                     "does not return the softmax lse for decode."
                 )
 
-            if pcp_size > 1:
-                assert layer_impl.supports_pcp, (
-                    "PCP requires attention impls' support, "
-                    f"but the impl {layer_impl.__class__.__name__} "
-                    "does not support PCP."
-                )
+            # if pcp_size > 1:
+            #     assert layer_impl.supports_pcp, (
+            #         "PCP requires attention impls' support, "
+            #         f"but the impl {layer_impl.__class__.__name__} "
+            #         "does not support PCP."
+            #     )

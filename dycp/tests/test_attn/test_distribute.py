@@ -29,7 +29,7 @@ def _avg_distribute_tokens_to_ranks(
         print(f"------ : {results}",flush=True)
         return results
 
-def get_dcp_local_seq_lens(
+def get_cp_local_seq_lens(
     seq_lens: torch.Tensor,
     dcp_size: int = 1,
     dcp_rank: int | None = None,
@@ -123,7 +123,7 @@ def _avg_distribute_tokens_to_ranks_2(
     return result
 
 
-def get_dcp_local_seq_lens_all_ranks(
+def get_cp_local_seq_lens_all_ranks(
     seq_lens: list[int],
     dcp_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
@@ -180,10 +180,10 @@ if __name__ == "__main__":
     results = _avg_distribute_tokens_to_ranks(1, 100)
     results = _avg_distribute_tokens_to_ranks(2, 100)
     results = _avg_distribute_tokens_to_ranks(3, 100)
-    results = get_dcp_local_seq_lens(torch.tensor([100]), 1, 0, 64)
-    results = get_dcp_local_seq_lens_all_ranks([100], 1, 64)
-    results = get_dcp_local_seq_lens_all_ranks([100], 2, 64)
-    results = get_dcp_local_seq_lens_all_ranks([1500], 4, 64)
+    results = get_cp_local_seq_lens(torch.tensor([100]), 1, 0, 64)
+    results = get_cp_local_seq_lens_all_ranks([100], 1, 64)
+    results = get_cp_local_seq_lens_all_ranks([100], 2, 64)
+    results = get_cp_local_seq_lens_all_ranks([1500], 4, 64)
     _avg_distribute_tokens_to_ranks_2(100, 1, 64)
     _avg_distribute_tokens_to_ranks_2(100, 2, 64)
     _avg_distribute_tokens_to_ranks_2(1500, 4, 64)
