@@ -326,7 +326,9 @@ class GPUModelRunner(
         self.cp_world_size = self.dcp_world_size * self.pcp_world_size
         self.dycp_world_size = self.parallel_config.dp_per_domain
         self.dycp_rank = 0 if self.dycp_world_size <= 1 else get_dycp_group().rank_in_group
-
+        if self.dycp_world_size > 1:
+            self.cp_world_size = self.dycp_world_size
+            self.cp_rank = self.dycp_rank
         # Broadcast PP output for external_launcher (torchrun)
         # to make sure we are synced across pp ranks
         # TODO: Support overlapping mirco-batches
@@ -495,6 +497,10 @@ class GPUModelRunner(
             max_buffer_num_tokens = (
                 self.max_num_tokens + self.max_num_reqs * 2 * self.pcp_world_size
             )
+        elif self.dycp_world_size > 1:
+            max_buffer_num_tokens = (
+                self.max_num_tokens + self.max_num_reqs * 2 * self.dycp_world_size
+            )
         else:
             max_buffer_num_tokens = self.max_num_tokens
 
@@ -512,7 +518,7 @@ class GPUModelRunner(
             )
 
         if self.dycp_world_size > 1:
-            self.dycp_local_seq_lens = self._make_buffer(
+            self.cp_local_seq_lens = self._make_buffer(
             self.max_num_reqs, dtype=torch.int32
         )
 
@@ -547,6 +553,16 @@ class GPUModelRunner(
             self.pcp_manager = PCPManager(
                 self.pcp_world_size,
                 self.pcp_rank,
+                max_buffer_num_tokens,
+                self.max_num_reqs,
+                self.device,
+                self.pin_memory,
+            )
+
+        elif self.dycp_world_size > 1:
+            self.pcp_manager = PCPManager(
+                self.dycp_world_size,
+                self.dycp_rank,
                 max_buffer_num_tokens,
                 self.max_num_reqs,
                 self.device,
@@ -1362,6 +1378,17 @@ class GPUModelRunner(
             logits_indices, spec_decode_metadata,
         ]
         """
+        num_dycp_reqs = scheduler_output.num_cp_request
+        _debug_num_scheduled_tokens = (
+            [num_scheduled_tokens]
+            if isinstance(num_scheduled_tokens, int)
+            else num_scheduled_tokens
+        )
+        num_dycp_tokens = (
+            sum(_debug_num_scheduled_tokens[:num_dycp_reqs])
+            if num_dycp_reqs > 0 else 0
+        )
+
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -1404,15 +1431,77 @@ class GPUModelRunner(
             total_num_scheduled_tokens = sum(num_scheduled_tokens)
             scheduler_output.total_num_scheduled_tokens = total_num_scheduled_tokens
 
+            # req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
+            # cu_num_tokens, _ = self._get_cumsum_and_arange(num_scheduled_tokens)
+            # positions_np = self.positions.np[:total_num_scheduled_tokens]
+            # np.add(
+            #     self.input_batch.num_computed_tokens_cpu[req_indices],
+            #     pcp_positions[:total_num_scheduled_tokens],
+            #     out=positions_np,
+            # )
             req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
-            cu_num_tokens, _ = self._get_cumsum_and_arange(num_scheduled_tokens)
+            cu_num_tokens, arange = self._get_cumsum_and_arange(num_scheduled_tokens)  # 不要丢弃 arange
+
             positions_np = self.positions.np[:total_num_scheduled_tokens]
+
+            # DyCP 请求部分：使用 pcp_positions（全局位置）
             np.add(
-                self.input_batch.num_computed_tokens_cpu[req_indices],
-                pcp_positions[:total_num_scheduled_tokens],
-                out=positions_np,
+                self.input_batch.num_computed_tokens_cpu[req_indices[:total_num_pcp_scheduled_tokens]],
+                pcp_positions[:total_num_pcp_scheduled_tokens],
+                out=positions_np[:total_num_pcp_scheduled_tokens],
             )
 
+            # DP 请求部分：使用标准 arange 方式
+            if total_num_pcp_scheduled_tokens < total_num_scheduled_tokens:
+                dp_start = total_num_pcp_scheduled_tokens
+                np.add(
+                    self.input_batch.num_computed_tokens_cpu[req_indices[dp_start:total_num_scheduled_tokens]],
+                    arange[dp_start:total_num_scheduled_tokens],
+                    out=positions_np[dp_start:total_num_scheduled_tokens],
+                )
+
+        elif self.dycp_world_size > 1:
+            total_num_pcp_scheduled_tokens = 0
+            num_cp_request = scheduler_output.num_cp_request
+            if num_cp_request > 0:
+                num_scheduled_tokens[:num_cp_request], pcp_positions = (
+                    self.pcp_manager.update_tokens_for_pcp(
+                        num_scheduled_tokens[:num_cp_request],
+                        self.arange_np,
+                        scheduler_output.num_cp_request,
+                        self.reorder_batch_threshold,
+                    )
+                )
+
+                num_dycp_tokens = sum(num_scheduled_tokens[:num_cp_request])
+                assert num_dycp_tokens > 0 or num_cp_request == 0, \
+                    f"Inconsistent: num_dycp_tokens={num_dycp_tokens}, num_cp_request={num_cp_request}"
+                # Re-update after PCP split sequences.
+                total_num_scheduled_tokens = sum(num_scheduled_tokens)
+                scheduler_output.total_num_scheduled_tokens = total_num_scheduled_tokens
+
+                # req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
+                total_num_pcp_scheduled_tokens = sum(num_scheduled_tokens[:num_cp_request])
+                req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
+                cu_num_tokens, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
+
+                positions_np = self.positions.np[:total_num_scheduled_tokens]
+
+                # DyCP 请求部分：使用 pcp_positions（全局位置）
+                np.add(
+                    self.input_batch.num_computed_tokens_cpu[req_indices[:total_num_pcp_scheduled_tokens]],
+                    pcp_positions[:total_num_pcp_scheduled_tokens],
+                    out=positions_np[:total_num_pcp_scheduled_tokens],
+                )
+
+                # DP 请求部分：使用标准 arange 方式
+                if total_num_pcp_scheduled_tokens < total_num_scheduled_tokens:
+                    dp_start = total_num_pcp_scheduled_tokens
+                    np.add(
+                        self.input_batch.num_computed_tokens_cpu[req_indices[dp_start:total_num_scheduled_tokens]],
+                        arange[dp_start:total_num_scheduled_tokens],
+                        out=positions_np[dp_start:total_num_scheduled_tokens],
+                    )
 
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -1489,7 +1578,7 @@ class GPUModelRunner(
 
                 output_idx += num_sched
 
-        if self.dycp_world_size > 1:
+        if self.dycp_world_size > 1 and scheduler_output.num_cp_request > 0:
             self.input_batch.block_table.compute_domain_slot_mapping(req_indices, positions_np, scheduler_output.num_cp_request)
         else:
             self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
@@ -1526,6 +1615,19 @@ class GPUModelRunner(
                     num_tokens_np=num_tokens_np,
                 )
             )
+        elif self.dycp_world_size > 1 and scheduler_output.num_cp_request > 0:
+            self.discard_request_mask.np[:scheduler_output.num_cp_request] = (
+                self.pcp_manager.get_discard_request_mask(
+                    num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu,
+                    num_scheduled_tokens=num_scheduled_tokens[:num_dycp_reqs],
+                    num_reqs=num_dycp_reqs,
+                    num_tokens_np=num_tokens_np[:num_dycp_reqs],
+                )
+            )
+            if num_dycp_reqs < num_reqs:
+                self.discard_request_mask.np[num_dycp_reqs:num_reqs] = (
+                    self.seq_lens.np[num_dycp_reqs:num_reqs] < num_tokens_np[num_dycp_reqs:num_reqs]
+                )
         else:
             self.discard_request_mask.np[:num_reqs] = (
                 self.seq_lens.np[:num_reqs] < num_tokens_np
@@ -1567,6 +1669,22 @@ class GPUModelRunner(
                 logits_indices = self.pcp_manager.get_logits_indices(
                     cu_num_tokens, num_reqs
                 )
+            elif self.dycp_world_size > 1 and scheduler_output.num_cp_request > 0:
+                num_dycp_tokens = sum(num_scheduled_tokens[:num_dycp_reqs])
+                # logits_indices[:num_dycp_reqs] = self.pcp_manager.get_logits_indices(
+                #     cu_num_tokens[:num_dycp_tokens], num_dycp_reqs
+                # )
+                logits_indices[:num_dycp_reqs] = self.pcp_manager.get_logits_indices(
+                    cu_num_tokens[:num_dycp_reqs], num_dycp_reqs
+                )
+                if num_dycp_reqs < num_reqs:
+                    # DyCP allgather 后的总大小
+                    dycp_allgathered_size = (
+                        cu_num_tokens[num_dycp_reqs - 1] * self.dycp_world_size
+                        - sum(self.pcp_manager.num_pcp_pads_cpu[:num_dycp_reqs])
+                    )
+                    # DP 部分的原始偏移是基于 num_dycp_tokens 的，需要改为基于 dycp_allgathered_size
+                    logits_indices[num_dycp_reqs:] += (dycp_allgathered_size - num_dycp_tokens)
             num_draft_tokens = None
             spec_decode_metadata = None
             num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
@@ -1593,6 +1711,7 @@ class GPUModelRunner(
                     )
                     else -1
                 )
+            #TODO(XIAOCHEN): DyCP support MTP
             spec_decode_metadata = self._calc_spec_decode_metadata(
                 num_draft_tokens, cu_num_tokens
             )
@@ -1632,6 +1751,7 @@ class GPUModelRunner(
         num_scheduled_tokens: dict[str, int] | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
         num_dycp_reqs: int = 0,
+        num_dycp_tokens: int = 0,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
@@ -1644,6 +1764,18 @@ class GPUModelRunner(
             "PCP not support pad attn now"
         )
 
+        # _debug_num_scheduled_tokens = list((
+        #     [num_scheduled_tokens]
+        #     if isinstance(num_scheduled_tokens, int)
+        #     else num_scheduled_tokens
+        # ).values())
+        # logger.info(f"chenxiao--debug num_scheduled_tokens:{_debug_num_scheduled_tokens}")
+        # num_dycp_tokens = (
+        #     sum(_debug_num_scheduled_tokens[:num_dycp_reqs])
+        #     if num_dycp_reqs > 0 else 0
+        # )
+        # logger.info("chenxiao--debug num_dycp_tokens:{num_dycp_tokens}")
+    
         num_tokens_padded = num_tokens_padded or num_tokens
         num_reqs_padded = num_reqs_padded or num_reqs
         assert num_reqs_padded is not None and num_tokens_padded is not None
@@ -1672,18 +1804,31 @@ class GPUModelRunner(
         def _get_block_table_and_slot_mapping(kv_cache_gid: int):
             assert num_reqs_padded is not None and num_tokens_padded is not None
             kv_cache_spec = kv_cache_groups[kv_cache_gid].kv_cache_spec
-            maybe_pcp_full_tokens = (
-                num_tokens_padded
-                if self.pcp_world_size == 1
-                else num_tokens * self.pcp_world_size
-                - sum(self.pcp_manager.num_pcp_pads_cpu[:num_reqs])
-            )
+            # maybe_pcp_full_tokens = (
+            #     num_tokens_padded
+            #     if self.pcp_world_size == 1
+            #     else num_tokens * self.pcp_world_size
+            #     - sum(self.pcp_manager.num_pcp_pads_cpu[:num_reqs])
+            # )
+            if self.pcp_world_size * self.dycp_world_size == 1 or num_dycp_reqs == 0:
+                maybe_pcp_full_tokens = num_tokens_padded
+            elif self.dycp_world_size > 1:
+                dycp_padded_tokens = num_dycp_tokens * self.dycp_world_size - sum(self.pcp_manager.num_pcp_pads_cpu[:num_dycp_reqs])
+                non_dycp_tokens = num_tokens - num_dycp_tokens
+                maybe_pcp_full_tokens = dycp_padded_tokens + non_dycp_tokens
+                logger.info(f"chenxiao--debug maybe_pcp_full_tokens:{maybe_pcp_full_tokens}")
+                logger.info(f"chenxiao--debug non_dycp_tokens:{non_dycp_tokens}")
+                logger.info(f"chenxiao--debug dycp_padded_tokens:{dycp_padded_tokens}")
+                logger.info(f"chenxiao--debug num_tokens:{num_tokens}")
+            elif self.pcp_world_size > 1:
+                maybe_pcp_full_tokens = num_tokens * self.pcp_world_size - sum(self.pcp_manager.num_pcp_pads_cpu[:num_reqs])
             if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
                 blk_table_tensor = torch.zeros(
                     (num_reqs_padded, 1),
                     dtype=torch.int32,
                     device=self.device,
                 )
+                logger.info(f"chenxiao--debug num_tokens_padded:{num_tokens_padded}")
                 slot_mapping = torch.zeros(
                     (num_tokens_padded,),
                     dtype=torch.int64,
@@ -1692,11 +1837,12 @@ class GPUModelRunner(
             else:
                 blk_table = self.input_batch.block_table[kv_cache_gid]
                 blk_table_tensor = blk_table.get_device_tensor(num_reqs_padded)
+                logger.info(f"chenxiao--debug maybe_pcp_full_tokens:{maybe_pcp_full_tokens}")
                 slot_mapping = blk_table.slot_mapping.gpu[:maybe_pcp_full_tokens]
 
                 # Fill unused with -1. Needed for reshape_and_cache in full cuda
                 # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
-                if self.pcp_world_size == 1:
+                if self.pcp_world_size * self.dycp_world_size == 1:
                     slot_mapping[num_tokens:num_tokens_padded].fill_(-1)
                     blk_table_tensor[num_reqs:num_reqs_padded].fill_(-1)
             if self.pcp_world_size > 1:
@@ -1706,7 +1852,21 @@ class GPUModelRunner(
                     num_tokens,
                     slot_mapping,
                 )
-
+            elif self.dycp_world_size > 1 and num_dycp_tokens > 0:
+                # 获取 DyCP 部分 padded 后的 slot_mapping
+                padded_dycp_slot_mapping = self.pcp_manager.get_padded_slot_mapping(
+                    num_dycp_tokens,
+                    # dycp_original_slot_mapping,
+                    slot_mapping,
+                )
+                num_dycp_padded_tokens = len(padded_dycp_slot_mapping)
+                # 获取非 DyCP 部分的 slot_mapping
+                if num_tokens > num_dycp_padded_tokens:
+                    non_dycp_slot_mapping = slot_mapping[num_dycp_padded_tokens:num_tokens]
+                
+                    slot_mapping = torch.cat([padded_dycp_slot_mapping, non_dycp_slot_mapping], dim=0)
+                else:
+                    slot_mapping = padded_dycp_slot_mapping
             return blk_table_tensor, slot_mapping
 
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
@@ -1726,9 +1886,24 @@ class GPUModelRunner(
             slot_mapping=slot_mapping_gid_0,
             causal=True,
             num_dycp_reqs=num_dycp_reqs,
+            num_dycp_tokens=num_dycp_tokens,
         )
+        if self.dycp_world_size > 1 and num_dycp_reqs > 0:
+            self.cp_local_seq_lens.cpu[:num_dycp_reqs] = get_cp_local_seq_lens(
+                self.seq_lens.cpu[:num_dycp_reqs],
+                self.dycp_world_size,
+                self.dycp_rank,
+                self.parallel_config.cp_kv_cache_interleave_size,
+            )
+            self.cp_local_seq_lens.cpu[num_dycp_reqs:num_reqs].copy_(self.seq_lens.cpu[num_dycp_reqs:num_reqs])
+            self.cp_local_seq_lens.cpu[num_reqs:].fill_(0)
+            self.cp_local_seq_lens.copy_to_gpu(num_reqs_padded)
 
-        if self.cp_world_size > 1:
+            cm_base.cp_local_seq_lens = self.cp_local_seq_lens.gpu[:num_reqs_padded]
+            cm_base.cp_local_seq_lens_cpu = self.cp_local_seq_lens.cpu[
+                :num_reqs_padded
+            ]
+        elif self.pcp_world_size * self.dcp_world_size > 1:
             self.cp_local_seq_lens.cpu[:num_reqs] = get_cp_local_seq_lens(
                 self.seq_lens.cpu[:num_reqs],
                 self.cp_world_size,
@@ -1742,27 +1917,17 @@ class GPUModelRunner(
             cm_base.cp_local_seq_lens_cpu = self.cp_local_seq_lens.cpu[
                 :num_reqs_padded
             ]
-
         if self.pcp_world_size > 1:
             cm_base.pcp_allgather_restore_idx=self.pcp_manager.pcp_allgather_restore_idx.gpu[
                     : num_tokens * self.pcp_world_size
                 ]
 
-        if self.dycp_world_size > 1:
-            self.dycp_local_seq_lens.cpu[:num_dycp_reqs] = get_cp_local_seq_lens(
-                self.seq_lens.cpu[:num_dycp_reqs],
-                self.dycp_world_size,
-                self.dycp_rank,
-                self.parallel_config.cp_kv_cache_interleave_size,
-            )
-            self.dycp_local_seq_lens.cpu[num_dycp_reqs:num_reqs].copy_(self.seq_lens.cpu[num_dycp_reqs:num_reqs])
-            self.dycp_local_seq_lens.cpu[num_reqs:].fill_(0)
-            self.dycp_local_seq_lens.copy_to_gpu(num_reqs_padded)
-
-            cm_base.dycp_local_seq_lens = self.dycp_local_seq_lens.gpu[:num_reqs_padded]
-            cm_base.dycp_local_seq_lens_cpu = self.dycp_local_seq_lens.cpu[
-                :num_reqs_padded
-            ]
+        elif self.dycp_world_size > 1:
+            if num_dycp_tokens > 0: #TODO fix
+                dycp_allgather_size = num_dycp_tokens * self.dycp_world_size
+                cm_base.pcp_allgather_restore_idx = self.pcp_manager.pcp_allgather_restore_idx.gpu[
+                    :dycp_allgather_size
+                ]
 
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
             cm_base.num_logits_indices = logits_indices.size(0)
@@ -3132,6 +3297,24 @@ class GPUModelRunner(
                 if self.pcp_world_size > 1:
                     max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
                     num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
+                elif self.dycp_world_size > 1:
+                    # Separate calculation for dycp and non-dycp requests
+                    num_dycp_reqs = scheduler_output.num_cp_request
+                    if num_dycp_reqs > 0:
+                        # dycp requests
+                        dycp_tokens = num_scheduled_tokens_np[:num_dycp_reqs]
+                        max_dycp_tokens = int(dycp_tokens.max()) if len(dycp_tokens) > 0 else 0
+                        num_dycp_tokens_unpadded = int(dycp_tokens.sum())
+
+                        # dp requests
+                        non_dycp_tokens = num_scheduled_tokens_np[num_dycp_reqs:]
+                        max_non_dycp_tokens = int(non_dycp_tokens.max()) if len(non_dycp_tokens) > 0 else 0
+                        num_non_dycp_tokens_unpadded = int(non_dycp_tokens.sum())
+
+                        # Use max of both parts
+                        max_num_scheduled_tokens = max(max_dycp_tokens, max_non_dycp_tokens)
+                        num_tokens_unpadded = num_dycp_tokens_unpadded + num_non_dycp_tokens_unpadded
+                        logger.info(f"chenxiao--debug chenxiao--debug num_tokens_unpadded:{num_tokens_unpadded}")
 
                 cascade_attn_prefix_lens = None
                 # Disable cascade attention when using microbatching (DBO)
@@ -3184,6 +3367,13 @@ class GPUModelRunner(
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
                 ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
 
+                # Calculate num_dycp_tokens
+                if scheduler_output.num_cp_request > 0:
+                    num_dycp_reqs = scheduler_output.num_cp_request
+                    num_dycp_tokens = int(num_scheduled_tokens_np[:num_dycp_reqs].sum())
+                else:
+                    num_dycp_tokens = 0
+
                 (attn_metadata, spec_decode_common_attn_metadata) = (
                     self._build_attention_metadata(
                         num_tokens=num_tokens_unpadded,
@@ -3197,6 +3387,7 @@ class GPUModelRunner(
                         num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                         cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                         num_dycp_reqs=scheduler_output.num_cp_request,
+                        num_dycp_tokens=num_dycp_tokens,
                     )
                 )
 
@@ -3259,6 +3450,45 @@ class GPUModelRunner(
                     num_tokens_unpadded,
                 )
                 # Restore total_num_scheduled_tokens.
+                scheduler_output.total_num_scheduled_tokens = num_scheduled_tokens
+            
+            # elif self.dycp_world_size > 1 and scheduler_output.num_cp_request > 0:
+            #     num_cp_request = scheduler_output.num_cp_request
+
+            #     # num_dycp_tokens_unpadded = sum(
+            #     #     list(scheduler_output.num_scheduled_tokens.values())[:num_cp_request]
+            #     # )
+            #     num_dycp_tokens_unpadded = int(num_scheduled_tokens_np[:num_cp_request].sum())
+
+            #     # 分离 DYCP 和非 DYCP 部分的 hidden_states
+            #     dycp_hidden_states = hidden_states[:num_dycp_tokens_unpadded]
+            #     non_dycp_hidden_states = hidden_states[num_dycp_tokens_unpadded:]
+                
+            #     # 只对 DYCP 部分进行 all_gather 和 restore
+            #     dycp_hidden_states = self.pcp_manager.get_dycp_restore_hidden_states(
+            #         dycp_hidden_states,
+            #         num_dycp_tokens_unpadded,
+            #     )
+                
+            #     # 合并回来
+            #     hidden_states = torch.cat([dycp_hidden_states, non_dycp_hidden_states], dim=0)
+                
+            #     # Restore total_num_scheduled_tokens.
+            #     scheduler_output.total_num_scheduled_tokens = num_scheduled_tokens
+        # ✅ 正确：
+            elif self.dycp_world_size > 1 and scheduler_output.num_cp_request > 0:
+                num_cp_request = scheduler_output.num_cp_request
+                # 使用 PCP update 后的 num_scheduled_tokens_np
+                num_dycp_tokens_unpadded = int(num_scheduled_tokens_np[:num_cp_request].sum())
+                
+                dycp_hidden_states = hidden_states[:num_dycp_tokens_unpadded]
+                non_dycp_hidden_states = hidden_states[num_dycp_tokens_unpadded:]
+                
+                dycp_hidden_states = self.pcp_manager.get_dycp_restore_hidden_states(
+                    dycp_hidden_states, num_dycp_tokens_unpadded,
+                )
+                
+                hidden_states = torch.cat([dycp_hidden_states, non_dycp_hidden_states], dim=0)
                 scheduler_output.total_num_scheduled_tokens = num_scheduled_tokens
 
             if not self.broadcast_pp_output:
@@ -4288,6 +4518,7 @@ class GPUModelRunner(
                 ubatch_slices=ubatch_slices_padded if pad_attn else ubatch_slices,
                 for_cudagraph_capture=is_graph_capturing,
                 num_dycp_reqs=num_cp_tokens,
+                num_dycp_tokens=0,  # CUDA graph capture uses dummy values
             )
 
         with self.maybe_dummy_run_with_lora(

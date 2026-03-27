@@ -275,7 +275,8 @@ class ExampleConnector(KVConnectorBase_V1):
             the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
         """
-        return len(request.prompt_token_ids) - 1, False
+        # return len(request.prompt_token_ids) - 1, False
+        return 0, False
         # NOTE: in this debug implementation, we assume that the prompt is
         # cached_prompt + newly_generated_single_token
         # Therefore, we use prompt_token_ids[:-1] to determine the folder name

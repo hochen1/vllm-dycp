@@ -10,6 +10,7 @@ import vllm.envs as envs
 from vllm.config import ParallelConfig
 from vllm.distributed import (
     get_dp_group,
+    get_dycp_group,
     get_pcp_group,
     get_tensor_model_parallel_rank,
 )
@@ -795,10 +796,12 @@ FUSED_MOE_UNQUANTIZED_CONFIG: FusedMoEQuantConfig = FusedMoEQuantConfig.make()
 class FusedMoEParallelConfig:
     tp_size: int
     pcp_size: int
+    dycp_size: int
     dp_size: int
     ep_size: int
     tp_rank: int
     pcp_rank: int
+    dycp_rank: int
     dp_rank: int
     ep_rank: int
 
@@ -925,6 +928,15 @@ class FusedMoEParallelConfig:
         dp_rank = get_dp_group().rank_in_group if dp_size > 1 else 0
         pcp_size = pcp_size_
         pcp_rank = get_pcp_group().rank_in_group if pcp_size > 1 else 0
+
+        # Get dycp_size and dycp_rank
+        try:
+            dycp_size = get_dycp_group().world_size
+            dycp_rank = get_dycp_group().rank_in_group if dycp_size > 1 else 0
+        except AssertionError:
+            # DYCP group may not be initialized
+            dycp_size = 1
+            dycp_rank = 0
         tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp_and_pcp(
             tp_size_, dp_size_, dp_rank, pcp_size_, pcp_rank
         )
@@ -935,6 +947,8 @@ class FusedMoEParallelConfig:
                 tp_rank=tp_rank,
                 pcp_size=pcp_size,
                 pcp_rank=pcp_rank,
+                dycp_size=dycp_size,
+                dycp_rank=dycp_rank,
                 dp_size=dp_size,
                 dp_rank=dp_rank,
                 ep_size=1,
@@ -953,6 +967,8 @@ class FusedMoEParallelConfig:
             tp_rank=0,
             pcp_size=pcp_size,
             pcp_rank=pcp_rank,
+            dycp_size=dycp_size,
+            dycp_rank=dycp_rank,
             dp_size=dp_size,
             dp_rank=dp_rank,
             ep_size=ep_size,

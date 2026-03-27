@@ -123,12 +123,21 @@ class AgRsAll2AllManager(All2AllManagerBase):
         assert sizes is not None
 
         dist_group = get_ep_group() if is_sequence_parallel else get_dp_group()
+
+        # logger.info(f"chenxiao--debug [all2all.dispatch] rank_in_group={dist_group.rank_in_group}, "
+        #             f"hidden_states.shape={hidden_states.shape}, router_logits.shape={router_logits.shape}, "
+        #             f"sizes={sizes}, is_sequence_parallel={is_sequence_parallel}")
+        # logger.info(f"chenxiao--debug [all2all.dispatch] sizes[rank_in_group]={sizes[dist_group.rank_in_group]}, "
+        #             f"hidden_states.shape[0]={hidden_states.shape[0]}")
+
         assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
         hidden_states, router_logits = dist_group.all_gatherv(
             [hidden_states, router_logits],
             dim=0,
             sizes=sizes,
         )
+        # logger.info(f"chenxiao--debug [all2all.dispatch] after all_gatherv: hidden_states.shape={hidden_states.shape}, "
+        #             f"router_logits.shape={router_logits.shape}")
         return hidden_states, router_logits
 
     def combine(

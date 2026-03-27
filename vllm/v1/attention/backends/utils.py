@@ -110,6 +110,7 @@ class CommonAttentionMetadata:
     """Sequence lengths of the local rank in dynamic decode context parallelism world"""
 
     num_dycp_reqs: int = 0
+    num_dycp_tokens: int = 0
     
     @property
     @deprecated(
@@ -915,6 +916,8 @@ def split_decodes_and_prefills(
     num_reqs = common_attn_metadata.num_reqs
     num_tokens = common_attn_metadata.num_actual_tokens
     query_start_loc = common_attn_metadata.query_start_loc_cpu
+    seq_lens = common_attn_metadata.seq_lens
+
 
     if max_query_len <= decode_threshold and (
         not require_uniform or decode_threshold <= 1
@@ -922,6 +925,7 @@ def split_decodes_and_prefills(
         return num_reqs, 0, num_tokens, 0
 
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
+
     if query_lens[0].item() > decode_threshold:
         # first request is not decode, so no decode requests
         return 0, num_reqs, 0, num_tokens
@@ -946,6 +950,7 @@ def split_decodes_and_prefills(
     num_prefills = num_reqs - num_decodes
     num_decode_tokens = query_start_loc[first_prefill].item()
     num_prefill_tokens = num_tokens - num_decode_tokens
+
     return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
 
 
@@ -1326,60 +1331,95 @@ def get_pcp_kv_indices(
     )
     return torch.from_numpy(kv_head_indices), torch.from_numpy(kv_tail_indices)
 
+# def reorder_batch_to_split_cp_and_normal(
+#     input_batch: "InputBatch",
+#     scheduler_output: "SchedulerOutput",
+# ) -> bool:
+#     """Move CP-flagged requests to the front of the batch.
+#        Expected order: [cp, cp, ncp, ncp], all cp is ahead of ncp
+#     """
+
+#     req_ids = input_batch.req_ids
+#     num_reqs = len(req_ids)
+
+#     # 1. Mark which requests are CP（cp_rank_scheduled_tokens[rid] > 1）
+#     is_cp = np.array(
+#         [scheduler_output.cp_rank_scheduled_tokens[rid] > 1 for rid in req_ids],
+#         dtype=bool,
+#     )
+
+#     # 2. Original order: cp = 0, ncp = 1
+#     # [0, 1, 0, 1] (0 = cp, 1 = ncp)
+#     req_regions = np.zeros(is_cp.shape, dtype=np.int32)  # 0 = decode by default
+#     req_regions[~is_cp] = 1
+
+#     # 3. Calculate target positions: first CP, then non-CP
+#     num_cps = int(is_cp.sum())
+#     # [0, 0, 1, 1] (0 = cp, 1 = ncp)
+#     target_regions = np.zeros(num_reqs, dtype=np.int32)
+#     target_regions[num_cps :] = 1
+
+#     # [false, true, true, false] (true represents the need to swap)
+#     needs_swap = req_regions != target_regions
+
+#     if not needs_swap.any():
+#         return False
+    
+#     # Extract indices that need swapping and sort by target region
+#     # [1, 2]
+#     orig_indices = np.where(needs_swap)[0]
+#     # [1, 0] ---> [1, 0]
+#     sorted_order = np.argsort(req_regions[needs_swap], kind="stable")
+#     # [2, 1]
+#     src_indices = orig_indices[sorted_order]
+#     # {2:1, 1:2}
+#     src_dest_map = {int(src): int(dst) for src, dst in zip(src_indices, orig_indices)}
+
+#     # 4. Swap by cycles, and mark as done to avoid deadlocks
+#     # Iterate key
+#     for src in src_dest_map:
+#         dst = src_dest_map[src]
+#         # Swap alone the chain.
+#         while src != dst:
+#             input_batch.swap_states(src, dst)
+#             # Mark dst as done by updating its destination to itself
+#             next_dst = src_dest_map.get(dst, dst)
+#             src_dest_map[dst] = dst
+#             dst = next_dst
+
+#     return True
+
 def reorder_batch_to_split_cp_and_normal(
     input_batch: "InputBatch",
     scheduler_output: "SchedulerOutput",
 ) -> bool:
-    """Move CP-flagged requests to the front of the batch.
-       Expected order: [cp, cp, ncp, ncp], all cp is ahead of ncp
-    """
-
+    """Move CP-flagged requests to the front of the batch."""
+    logger.info(f"chenxiao--debug input_batch:{input_batch._req_ids}")
     req_ids = input_batch.req_ids
-    num_reqs = len(req_ids)
-
-    # 1. Mark which requests are CP（cp_rank_scheduled_tokens[rid] > 1）
-    is_cp = np.array(
-        [scheduler_output.cp_rank_scheduled_tokens[rid] > 1 for rid in req_ids],
-        dtype=bool,
-    )
-
-    # 2. Original order: cp = 0, ncp = 1
-    # [0, 1, 0, 1] (0 = cp, 1 = ncp)
-    req_regions = np.zeros(is_cp.shape, dtype=np.int32)  # 0 = decode by default
-    req_regions[~is_cp] = 1
-
-    # 3. Calculate target positions: first CP, then non-CP
-    num_cps = int(is_cp.sum())
-    # [0, 0, 1, 1] (0 = cp, 1 = ncp)
-    target_regions = np.zeros(num_reqs, dtype=np.int32)
-    target_regions[num_cps :] = 1
-
-    # [false, true, true, false] (true represents the need to swap)
-    needs_swap = req_regions != target_regions
-
-    if not needs_swap.any():
+    is_cp = np.array([True if scheduler_output.cp_rank_scheduled_tokens[rid] > 1 else False for rid in req_ids])
+    if not is_cp.any() or is_cp.all():
         return False
-    
-    # Extract indices that need swapping and sort by target region
-    # [1, 2]
-    orig_indices = np.where(needs_swap)[0]
-    # [1, 0] ---> [1, 0]
-    sorted_order = np.argsort(req_regions[needs_swap], kind="stable")
-    # [2, 1]
-    src_indices = orig_indices[sorted_order]
-    # {2:1, 1:2}
-    src_dest_map = {int(src): int(dst) for src, dst in zip(src_indices, orig_indices)}
-
-    # 4. Swap by cycles, and mark as done to avoid deadlocks
-    # Iterate key
-    for src in src_dest_map:
-        dst = src_dest_map[src]
-        # Swap alone the chain.
-        while src != dst:
-            input_batch.swap_states(src, dst)
-            # Mark dst as done by updating its destination to itself
-            next_dst = src_dest_map.get(dst, dst)
-            src_dest_map[dst] = dst
-            dst = next_dst
-
+    tgt = np.arange(len(req_ids))
+    tgt_cp, tgt_ncp = tgt[is_cp], tgt[~is_cp]
+    tgt[:] = np.concatenate([tgt_cp, tgt_ncp])
+    # 使用标记数组避免死循环
+    visited = np.zeros(len(tgt), dtype=bool)
+    for src, dst in enumerate(tgt):
+        if not visited[src] and src != dst:
+            # 处理一个完整的循环链
+            current = src
+            cycle = []
+            
+            # 收集整个循环链
+            while not visited[current]:
+                visited[current] = True
+                cycle.append(current)
+                current = tgt[current]
+            
+            # 在循环链内交换元素
+            if len(cycle) > 1:
+                for i in range(len(cycle) - 1):
+                    pos1, pos2 = cycle[i], cycle[i + 1]
+                    logger.info(f"chenxiao--debug swap_states src: {pos1}, dst: {pos2}")
+                    input_batch.swap_states(pos1, pos2)
     return True

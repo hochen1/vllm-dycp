@@ -76,7 +76,9 @@ class CrossDPExampleConnector(ExampleConnector):
         """
         Hack for only decode instance.
         """
-        return len(request.prompt_token_ids) - 1, False
+        # return len(request.prompt_token_ids) - 1, False
+        # prefill
+        return 0, False
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int

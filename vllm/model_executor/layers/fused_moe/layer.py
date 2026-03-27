@@ -17,6 +17,7 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.distributed import (
     get_dp_group,
+    get_dycp_group,
     get_ep_group,
     get_pcp_group,
     get_tensor_model_parallel_world_size,
@@ -695,6 +696,10 @@ class FusedMoE(CustomOp):
         return self.moe_parallel_config.pcp_size
 
     @property
+    def dycp_size(self):
+        return self.moe_parallel_config.dycp_size
+
+    @property
     def ep_size(self):
         return self.moe_parallel_config.ep_size
 
@@ -709,6 +714,10 @@ class FusedMoE(CustomOp):
     @property
     def pcp_rank(self):
         return self.moe_parallel_config.pcp_rank
+
+    @property
+    def dycp_rank(self):
+        return self.moe_parallel_config.dycp_rank
 
     @property
     def ep_rank(self):
