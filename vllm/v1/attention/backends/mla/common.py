@@ -1948,19 +1948,19 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             return attn_out, lse
         return attn_out
 
+    def _safe_index(
+        self, indices: torch.Tensor, upper_bound: int, device: torch.device
+    ) -> torch.Tensor:
+        # Guard against stale/misaligned CP indices to avoid CUDA gather OOB.
+        if indices.numel() == 0 or upper_bound <= 0:
+            return torch.empty((0,), device=device, dtype=torch.int64)
+        if indices.device != device or indices.dtype != torch.int64:
+            indices = indices.to(device=device, dtype=torch.int64, non_blocking=True)
+        return torch.clamp(indices, 0, upper_bound - 1).contiguous()
+
     def _run_prefill_new_tokens_fa(
         self, prefill: MLACommonPrefillMetadata, q, k, v, return_softmax_lse
     ):
-        def _safe_index(
-            indices: torch.Tensor, upper_bound: int, device: torch.device
-        ) -> torch.Tensor:
-            # Guard against stale/misaligned CP indices to avoid CUDA gather OOB.
-            if indices.numel() == 0 or upper_bound <= 0:
-                return torch.empty((0,), device=device, dtype=torch.int64)
-            if indices.device != device or indices.dtype != torch.int64:
-                indices = indices.to(device=device, dtype=torch.int64, non_blocking=True)
-            return torch.clamp(indices, 0, upper_bound - 1).contiguous()
-
         assert self.pcp_world_size is not None
         assert self.pcp_rank is not None
         if self.pcp_world_size > 1:
@@ -2095,16 +2095,16 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             and int(split_query_start_loc[-1].item()) > 0
         )
         if has_split_reqs:
-            q_head_indices = _safe_index(
+            q_head_indices = self._safe_index(
                 pcp_metadata.query_head_indices, q.shape[0], q.device
             )
-            q_tail_indices = _safe_index(
+            q_tail_indices = self._safe_index(
                 pcp_metadata.query_tail_indices, q.shape[0], q.device
             )
-            kv_head_indices = _safe_index(
+            kv_head_indices = self._safe_index(
                 pcp_metadata.kv_head_indices, k.shape[0], k.device
             )
-            kv_tail_indices = _safe_index(
+            kv_tail_indices = self._safe_index(
                 pcp_metadata.kv_tail_indices, k.shape[0], k.device
             )
             split_max_query_len = int(
@@ -2144,7 +2144,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             )
 
             split_output = torch.cat([output_head, output_tail], dim=0)
-            output_restore_idx = _safe_index(
+            output_restore_idx = self._safe_index(
                 pcp_metadata.output_restore_idx,
                 split_output.shape[0],
                 split_output.device,
@@ -2153,7 +2153,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
             if return_softmax_lse:
                 split_lse = torch.cat([lse_head, lse_tail], dim=-1)
-                lse_restore_idx = _safe_index(
+                lse_restore_idx = self._safe_index(
                     output_restore_idx, split_lse.shape[-1], split_lse.device
                 )
                 split_lse = torch.index_select(split_lse, -1, lse_restore_idx)
