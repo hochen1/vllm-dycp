@@ -1,0 +1,474 @@
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(APIServer pid=284661) INFO:     127.0.0.1:57192 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(APIServer pid=284661) INFO:     127.0.0.1:57198 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(APIServer pid=284661) INFO:     127.0.0.1:57212 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=5 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=4 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=6 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=7 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=2 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=3 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(APIServer pid=284661) INFO:     127.0.0.1:57216 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=0 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(APIServer pid=284661) INFO:     127.0.0.1:57230 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=1 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(APIServer pid=284661) INFO:     127.0.0.1:57246 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+(APIServer pid=284661) INFO:     127.0.0.1:57258 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=2565 kv_tail=6156 max_q=1026
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=3078 kv_tail=5643 max_q=1026
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=4104 kv_tail=4617 max_q=1026
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=1539 kv_tail=7182 max_q=1026
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=513 kv_tail=8208 max_q=1026
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=2565
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=1026 kv_tail=7695 max_q=1026
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=2052 kv_tail=6669 max_q=1026
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=3078
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=4104
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=1539
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=3591 kv_tail=5130 max_q=1026
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=513
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=1026
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=2052
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=3591
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=6156
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=5643
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=4617
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=7182
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=6669
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=8208
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=7695
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=5130
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=5 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=4 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=2 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=6 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=3 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=7 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=0 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=1 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=1539 kv_tail=7182 max_q=1026
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=3078 kv_tail=5643 max_q=1026
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=3591 kv_tail=5130 max_q=1026
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=2565 kv_tail=6156 max_q=1026
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=1026 kv_tail=7695 max_q=1026
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=4104 kv_tail=4617 max_q=1026
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=2052 kv_tail=6669 max_q=1026
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=513 kv_tail=8208 max_q=1026
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=1539
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=3078
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=3591
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=2565
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=1026
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=4104
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=2052
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=513
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=7182
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=5643
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=5130
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=6156
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=4617
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=7695
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=6669
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=8208
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=5 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=2 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=4 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=7 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=3 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=6 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=0 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=1 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=2565 kv_tail=6156 max_q=1026
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=3078 kv_tail=5643 max_q=1026
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=3591 kv_tail=5130 max_q=1026
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=1539 kv_tail=7182 max_q=1026
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=4104 kv_tail=4617 max_q=1026
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=1026 kv_tail=7695 max_q=1026
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=2052 kv_tail=6669 max_q=1026
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=2565
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=3078
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=513 kv_tail=8208 max_q=1026
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=3591
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=1539
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=2052
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=4104
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=1026
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=513
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=5643
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=6156
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=5130
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=7182
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=6669
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=4617
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=7695
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=8208
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=5 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=4 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=2 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=6 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=3 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=7 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=0 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=1 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_meta has_split=True split_qsl_numel=2 split_total_tokens=1026
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=3078 kv_tail=5643 max_q=1026
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=4104 kv_tail=4617 max_q=1026
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=2565 kv_tail=6156 max_q=1026
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=1539 kv_tail=7182 max_q=1026
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=3591 kv_tail=5130 max_q=1026
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=513 kv_tail=8208 max_q=1026
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=2052 kv_tail=6669 max_q=1026
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=3078
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=4104
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=2565
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=1539
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=3591
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=513
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=2052
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk split_indices q_head=513 q_tail=513 kv_head=1026 kv_tail=7695 max_q=1026
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_head_flash q=513 k=1026
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=4617
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=5643
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=7182
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=5130
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=6156
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=6669
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=8208
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_head_flash out=513
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_tail_flash q=513 k=7695
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_tail_flash out=513
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk after_restore split_output=1026 restore_idx=1026
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk before_return outputs=1 return_lse=False
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill after_new_tokens has_context=False
+(EngineCore_domain0 pid=284953) INFO 03-31 21:54:06 [cross_dp_scheduler.py:686] It's a short req, selected_dp: [0], request id: chatcmpl-bench-44fef85c-1
+(EngineCore_domain0 pid=284953) INFO 03-31 21:54:06 [cross_dp_scheduler.py:686] It's a short req, selected_dp: [1], request id: chatcmpl-bench-44fef85c-3
+(EngineCore_domain0 pid=284953) INFO 03-31 21:54:06 [cross_dp_scheduler.py:686] It's a short req, selected_dp: [2], request id: chatcmpl-bench-44fef85c-5
+(EngineCore_domain0 pid=284953) INFO 03-31 21:54:06 [cross_dp_scheduler.py:686] It's a short req, selected_dp: [3], request id: chatcmpl-bench-44fef85c-7
+(EngineCore_domain0 pid=284953) INFO 03-31 21:54:06 [cross_dp_scheduler.py:686] It's a short req, selected_dp: [4], request id: chatcmpl-bench-44fef85c-9
+(EngineCore_domain0 pid=284953) INFO 03-31 21:54:06 [cross_dp_scheduler.py:686] It's a short req, selected_dp: [5], request id: chatcmpl-bench-44fef85c-12
+(EngineCore_domain0 pid=284953) INFO 03-31 21:54:06 [cross_dp_scheduler.py:686] It's a short req, selected_dp: [6], request id: chatcmpl-bench-44fef85c-10
+(EngineCore_domain0 pid=284953) INFO 03-31 21:54:06 [cross_dp_scheduler.py:686] It's a short req, selected_dp: [7], request id: chatcmpl-bench-44fef85c-15
+(EngineCore_domain0 pid=284953) INFO 03-31 21:54:06 [cross_dp_scheduler.py:686] It's a short req, selected_dp: [0], request id: chatcmpl-bench-44fef85c-17
+(EngineCore_domain0 pid=284953) INFO 03-31 21:54:06 [cross_dp_scheduler.py:684] It's a cp req, selected_dp: [0, 1, 2, 3, 4, 5, 6, 7], request id: chatcmpl-bench-44fef85c-19
+(EngineCore_domain0 pid=284953) running_long_count: 0, max_long_requests: 4, has_slot_for_long_request: True
+(EngineCore_domain0 pid=284953) INFO 03-31 21:54:06 [cross_dp_scheduler.py:686] It's a short req, selected_dp: [1], request id: chatcmpl-bench-44fef85c-21
+(EngineCore_domain0 pid=284953) INFO 03-31 21:54:06 [cross_dp_scheduler.py:684] It's a cp req, selected_dp: [0, 1, 2, 3, 4, 5, 6, 7], request id: chatcmpl-bench-44fef85c-23
+(EngineCore_domain0 pid=284953) running_long_count: 1, max_long_requests: 4, has_slot_for_long_request: True
+(EngineCore_domain0 pid=284953) INFO 03-31 21:54:06 [cross_dp_scheduler.py:686] It's a short req, selected_dp: [2], request id: chatcmpl-bench-44fef85c-25
+(EngineCore_domain0 pid=284953) INFO 03-31 21:54:06 [cross_dp_scheduler.py:686] It's a short req, selected_dp: [3], request id: chatcmpl-bench-44fef85c-27
+(EngineCore_domain0 pid=284953) INFO 03-31 21:54:06 [cross_dp_scheduler.py:686] It's a short req, selected_dp: [4], request id: chatcmpl-bench-44fef85c-29
+(EngineCore_domain0 pid=284953) INFO 03-31 21:54:06 [cross_dp_scheduler.py:686] It's a short req, selected_dp: [5], request id: chatcmpl-bench-44fef85c-31
+(EngineCore_domain0 pid=284953) INFO 03-31 21:54:06 [cross_dp_scheduler.py:686] It's a short req, selected_dp: [6], request id: chatcmpl-bench-44fef85c-34
+(EngineCore_domain0 pid=284953) INFO 03-31 21:54:06 [cross_dp_scheduler.py:686] It's a short req, selected_dp: [7], request id: chatcmpl-bench-44fef85c-36
+(EngineCore_domain0 pid=284953) INFO 03-31 21:54:06 [cross_dp_scheduler.py:686] It's a short req, selected_dp: [0], request id: chatcmpl-bench-44fef85c-37
+(EngineCore_domain0 pid=284953) INFO 03-31 21:54:06 [cross_dp_scheduler.py:686] It's a short req, selected_dp: [1], request id: chatcmpl-bench-44fef85c-39
+(EngineCore_domain0 pid=284953) INFO 03-31 21:54:06 [cross_dp_scheduler.py:686] It's a short req, selected_dp: [2], request id: chatcmpl-bench-44fef85c-41
+(EngineCore_domain0 pid=284953) INFO 03-31 21:54:06 [cross_dp_scheduler.py:686] It's a short req, selected_dp: [3], request id: chatcmpl-bench-44fef85c-42
+(EngineCore_domain0 pid=284953) INFO 03-31 21:54:06 [cross_dp_scheduler.py:686] It's a short req, selected_dp: [4], request id: chatcmpl-bench-44fef85c-45
+(EngineCore_domain0 pid=284953) INFO 03-31 21:54:06 [cross_dp_scheduler.py:686] It's a short req, selected_dp: [5], request id: chatcmpl-bench-44fef85c-47
+(EngineCore_domain0 pid=284953) INFO 03-31 21:54:06 [cross_dp_scheduler.py:684] It's a cp req, selected_dp: [0, 1, 2, 3, 4, 5, 6, 7], request id: chatcmpl-bench-44fef85c-49
+(EngineCore_domain0 pid=284953) running_long_count: 2, max_long_requests: 4, has_slot_for_long_request: True
+(APIServer pid=284661) INFO:     127.0.0.1:56764 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1400 kv=11200 k_pe=11200 out=1400 num_decodes=0 num_prefills=2 num_decode_tokens=0 prefill_num_dycp_reqs=2 has_context=False
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=2066 kv=2066 k_pe=2066 out=2066 num_decodes=1 num_prefills=3 num_decode_tokens=374 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1400 k=11200 v=11200 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=2 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP0_EP0 pid=285495) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=0 cp_world=8 q=1400 k=11200 v=11200 num_unsplit_reqs=0 prefill_num_dycp_reqs=2 local_k=True
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1546 kv=1546 k_pe=1546 out=1546 num_decodes=1 num_prefills=2 num_decode_tokens=374 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill mixed_split dycp_tokens=1026 dp_tokens=1040 dycp_reqs=1 dp_reqs=2
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1546 kv=1546 k_pe=1546 out=1546 num_decodes=1 num_prefills=2 num_decode_tokens=374 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1546 kv=1546 k_pe=1546 out=1546 num_decodes=1 num_prefills=2 num_decode_tokens=374 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1546 kv=1546 k_pe=1546 out=1546 num_decodes=1 num_prefills=2 num_decode_tokens=374 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug mixed_dycp_allgather enter local_kv=1026 local_pe=1026 dycp_prefill_tokens=1026 total_dycp_tokens=1400 decode_dycp_reqs=1 decode_dycp_tokens=374 world=8
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1546 kv=1546 k_pe=1546 out=1546 num_decodes=1 num_prefills=2 num_decode_tokens=374 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1546 kv=1546 k_pe=1546 out=1546 num_decodes=1 num_prefills=2 num_decode_tokens=374 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill mixed_split dycp_tokens=1026 dp_tokens=520 dycp_reqs=1 dp_reqs=1
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill mixed_split dycp_tokens=1026 dp_tokens=520 dycp_reqs=1 dp_reqs=1
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill mixed_split dycp_tokens=1026 dp_tokens=520 dycp_reqs=1 dp_reqs=1
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug mixed_dycp_allgather enter local_kv=1026 local_pe=1026 dycp_prefill_tokens=1026 total_dycp_tokens=1400 decode_dycp_reqs=1 decode_dycp_tokens=374 world=8
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill mixed_split dycp_tokens=1026 dp_tokens=520 dycp_reqs=1 dp_reqs=1
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug mixed_dycp_allgather enter local_kv=1026 local_pe=1026 dycp_prefill_tokens=1026 total_dycp_tokens=1400 decode_dycp_reqs=1 decode_dycp_tokens=374 world=8
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug mixed_dycp_allgather enter local_kv=1026 local_pe=1026 dycp_prefill_tokens=1026 total_dycp_tokens=1400 decode_dycp_reqs=1 decode_dycp_tokens=374 world=8
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug mixed_dycp_allgather enter local_kv=1026 local_pe=1026 dycp_prefill_tokens=1026 total_dycp_tokens=1400 decode_dycp_reqs=1 decode_dycp_tokens=374 world=8
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill mixed_split dycp_tokens=1026 dp_tokens=520 dycp_reqs=1 dp_reqs=1
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill mixed_split dycp_tokens=1026 dp_tokens=520 dycp_reqs=1 dp_reqs=1
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug mixed_dycp_allgather enter local_kv=1026 local_pe=1026 dycp_prefill_tokens=1026 total_dycp_tokens=1400 decode_dycp_reqs=1 decode_dycp_tokens=374 world=8
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug mixed_dycp_allgather enter local_kv=1026 local_pe=1026 dycp_prefill_tokens=1026 total_dycp_tokens=1400 decode_dycp_reqs=1 decode_dycp_tokens=374 world=8
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug mixed_dycp_allgather before_restore restore_len=8208
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug mixed_dycp_allgather before_restore restore_len=8208
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug mixed_dycp_allgather before_restore restore_len=8208
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug mixed_dycp_allgather before_restore restore_len=8208
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug mixed_dycp_allgather before_restore restore_len=8208
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug mixed_dycp_allgather before_restore restore_len=8208
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP3_EP3 pid=285498) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=3 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug mixed_dycp_allgather before_restore restore_len=8208
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP6_EP6 pid=285501) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=6 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP5_EP5 pid=285500) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=5 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP2_EP2 pid=285497) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=2 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP4_EP4 pid=285499) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=4 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug _forward_prefill enter q=1026 kv=8208 k_pe=8208 out=1026 num_decodes=0 num_prefills=1 num_decode_tokens=0 prefill_num_dycp_reqs=1 has_context=False
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP7_EP7 pid=285502) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=7 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug prefill_fa enter q=1026 k=8208 v=8208 return_lse=False pcp_world=1 dycp_world=8 prefill_num_dycp_reqs=1 has_pcp_meta=True local_k=True
+(Worker_Domain0_DP1_EP1 pid=285496) INFO 03-31 21:54:06 [common.py:1972] chenxiao--debug dual_chunk enter cp_rank=1 cp_world=8 q=1026 k=8208 v=8208 num_unsplit_reqs=0 prefill_num_dycp_reqs=1 local_k=True
+(APIServer pid=284661) INFO 03-31 21:54:08 [loggers.py:248] Engine 000: Avg prompt throughput: 1640.1 tokens/s, Avg generation throughput: 0.2 tokens/s, Running: 12 reqs, Waiting: 47 reqs, GPU KV cache usage: 0.3%, Prefix cache hit rate: 0.0%
+(APIServer pid=284661) INFO 03-31 21:54:18 [loggers.py:248] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 12 reqs, Waiting: 47 reqs, GPU KV cache usage: 0.3%, Prefix cache hit rate: 0.0%
