@@ -2665,6 +2665,13 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 cur_allgather_kvcache.shape[-1]
                 == self.kv_lora_rank + self.qk_rope_head_dim
             )
+            sum_seq_len = int(prefill_metadata.chunked_context.cu_seq_lens_lst[i][-1])
+            if q_tokens == 0 or sum_seq_len == 0:
+                # Keep collective behavior consistent across ranks/chunks, but
+                # skip context reorg/attention when there is no local query or
+                # no context tokens in this chunk.
+                continue
+
             allgatered_kv_c_normed, allgatered_k_pe = cur_allgather_kvcache.unsqueeze(
                 1
             ).split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
@@ -2676,16 +2683,12 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     i
                 ],
                 local_context_lens_allranks=prefill_metadata.chunked_context.local_context_lens_allranks,
-                sum_seq_len=prefill_metadata.chunked_context.cu_seq_lens_lst[i][-1],
+                sum_seq_len=sum_seq_len,
                 max_seq_len=prefill_metadata.chunked_context.max_seq_lens[i],
                 chunk_size=prefill_metadata.chunked_context.chunk_size,
                 chunk_idx=i,
                 toks=toks,
             )
-            if q_tokens == 0:
-                # Some DyCP ranks can have zero local query tokens while still
-                # needing to participate in context all-gather.
-                continue
 
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
