@@ -570,7 +570,8 @@ def split_metadata(
                     else None
                 ),
                 cu_seq_lens_lst=(
-                    [s[:n_dycp] for s in cc.cu_seq_lens_lst]
+                    # Keep the leading 0 and the cumulative end offset.
+                    [s[: n_dycp + 1] for s in cc.cu_seq_lens_lst]
                     if cc.cu_seq_lens_lst is not None
                     else None
                 ),
@@ -709,7 +710,11 @@ def split_metadata(
                     else None
                 ),
                 cu_seq_lens_lst=(
-                    [s[n_dycp:] for s in cc.cu_seq_lens_lst]
+                    # Re-base cumulative offsets to start at 0 for dp sub-batch.
+                    [
+                        [v - s[n_dycp] for v in s[n_dycp:]]
+                        for s in cc.cu_seq_lens_lst
+                    ]
                     if cc.cu_seq_lens_lst is not None
                     else None
                 ),
