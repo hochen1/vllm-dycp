@@ -571,7 +571,7 @@ def split_metadata(
                     else None
                 ),
                 cu_seq_lens_lst=(
-                    [s[:n_dycp] for s in cc.cu_seq_lens_lst]
+                    [s[: n_dycp + 1] for s in cc.cu_seq_lens_lst]
                     if cc.cu_seq_lens_lst is not None
                     else None
                 ),
@@ -710,7 +710,7 @@ def split_metadata(
                     else None
                 ),
                 cu_seq_lens_lst=(
-                    [s[n_dycp:] for s in cc.cu_seq_lens_lst]
+                    [[x - s[n_dycp] for x in s[n_dycp:]] for s in cc.cu_seq_lens_lst]
                     if cc.cu_seq_lens_lst is not None
                     else None
                 ),
@@ -2506,6 +2506,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 output = output_tmp
                 output_lse = output_lse_tmp
 
+        if output is None:
+            return None, None
         return output, output_lse
 
     def _context_parallel_compute_prefill_context(
@@ -2621,6 +2623,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 output = output_tmp
                 output_lse = output_lse_tmp
 
+        if output is None:
+            return None, None
         return output, output_lse
 
     def _forward_prefill(
@@ -2680,6 +2684,11 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 context_output, context_lse = self._compute_prefill_context(
                     q, kv_c_and_k_pe_cache, attn_metadata, k_scale
                 )
+
+            if context_output is None or context_lse is None:
+                suffix_output = suffix_output[..., : v.shape[-1]].flatten(start_dim=-2)
+                output.copy_(suffix_output)
+                return
 
             # unpad if necessary
             if self._pad_v:
