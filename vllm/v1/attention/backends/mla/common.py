@@ -1968,6 +1968,86 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             indices = indices.to(device=device, dtype=torch.int64, non_blocking=True)
         return torch.clamp(indices, 0, upper_bound - 1).contiguous()
 
+    def _split_mixed_dycp_prefill_attn_metadata(
+        self,
+        attn_metadata: MLACommonMetadata,
+    ) -> tuple[MLACommonMetadata | None, MLACommonMetadata | None]:
+        assert attn_metadata.prefill is not None
+
+        prefill_num_dycp_reqs = attn_metadata.prefill.num_dycp_reqs
+        if (
+            prefill_num_dycp_reqs <= 0
+            or prefill_num_dycp_reqs >= attn_metadata.num_prefills
+        ):
+            return None, None
+
+        prefill_num_tokens = int(attn_metadata.prefill.query_start_loc[-1].item())
+        prefill_num_dycp_tokens = int(
+            attn_metadata.prefill.query_start_loc[prefill_num_dycp_reqs].item()
+        )
+        prefill_slot_mapping_start = attn_metadata.num_decode_tokens
+        prefill_slot_mapping = attn_metadata.slot_mapping[
+            prefill_slot_mapping_start:
+            prefill_slot_mapping_start + prefill_num_tokens
+        ]
+
+        prefill_attn_metadata = type(attn_metadata)(
+            num_reqs=attn_metadata.num_prefills,
+            max_query_len=attn_metadata.prefill.max_query_len,
+            max_seq_len=attn_metadata.max_seq_len,
+            num_actual_tokens=prefill_num_tokens,
+            query_start_loc=attn_metadata.prefill.query_start_loc,
+            slot_mapping=prefill_slot_mapping,
+            head_dim=attn_metadata.head_dim,
+            num_decodes=0,
+            num_decode_tokens=0,
+            num_prefills=attn_metadata.num_prefills,
+            prefill=attn_metadata.prefill,
+            decode=None,
+            pcp_allgather_restore_idx=None,
+            num_dycp_reqs=prefill_num_dycp_reqs,
+            num_dycp_tokens=prefill_num_dycp_tokens,
+        )
+        return split_metadata(prefill_attn_metadata)
+
+    def _allgather_mixed_dycp_prefill_kv(
+        self,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        attn_metadata: MLACommonMetadata,
+        dycp_prefill_tokens: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if dycp_prefill_tokens <= 0:
+            return kv_c_normed[:0], k_pe[:0]
+
+        assert self.dycp_world_size is not None
+        assert attn_metadata.pcp_allgather_restore_idx is not None
+
+        decode_dycp_reqs = min(attn_metadata.num_dycp_reqs, attn_metadata.num_decodes)
+        decode_dycp_tokens = 0
+        if decode_dycp_reqs > 0:
+            decode_dycp_tokens = int(
+                attn_metadata.query_start_loc[decode_dycp_reqs].item()
+            )
+
+        gathered_start = decode_dycp_tokens * self.dycp_world_size
+        gathered_end = (
+            decode_dycp_tokens + dycp_prefill_tokens
+        ) * self.dycp_world_size
+        restore_idx = attn_metadata.pcp_allgather_restore_idx[
+            gathered_start:gathered_end
+        ]
+        if restore_idx.numel() > 0 and gathered_start > 0:
+            restore_idx = restore_idx - gathered_start
+
+        return pcp_kv_allgather_and_restore(
+            kv_c_normed,
+            k_pe,
+            dycp_prefill_tokens,
+            restore_idx,
+            get_dycp_group(),
+        )
+
     def _run_prefill_new_tokens_fa(
         self, prefill: MLACommonPrefillMetadata, q, k, v, return_softmax_lse
     ):
@@ -2641,6 +2721,55 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         assert attn_metadata.prefill is not None
         assert self.dcp_world_size is not None
         assert self.pcp_world_size is not None
+
+        has_mixed_dycp_prefill = (
+            self.dycp_world_size > 1
+            and attn_metadata.prefill.num_dycp_reqs > 0
+            and attn_metadata.prefill.num_dycp_reqs < attn_metadata.num_prefills
+        )
+        if has_mixed_dycp_prefill:
+            dycp_attn_metadata, dp_attn_metadata = (
+                self._split_mixed_dycp_prefill_attn_metadata(attn_metadata)
+            )
+            dycp_num_tokens = (
+                0 if dycp_attn_metadata is None else dycp_attn_metadata.num_actual_tokens
+            )
+
+            if dycp_attn_metadata is not None and dycp_num_tokens > 0:
+                dycp_kv_c_normed = kv_c_normed[:dycp_num_tokens]
+                dycp_k_pe = k_pe[:dycp_num_tokens]
+                if attn_metadata.num_decodes > 0:
+                    dycp_kv_c_normed, dycp_k_pe = (
+                        self._allgather_mixed_dycp_prefill_kv(
+                            dycp_kv_c_normed,
+                            dycp_k_pe,
+                            attn_metadata,
+                            dycp_num_tokens,
+                        )
+                    )
+                self._forward_prefill(
+                    q[:dycp_num_tokens],
+                    dycp_kv_c_normed,
+                    dycp_k_pe,
+                    kv_c_and_k_pe_cache,
+                    dycp_attn_metadata,
+                    k_scale,
+                    output[:dycp_num_tokens],
+                )
+
+            if dp_attn_metadata is not None and dp_attn_metadata.num_actual_tokens > 0:
+                dp_start = dycp_num_tokens
+                dp_end = dp_start + dp_attn_metadata.num_actual_tokens
+                self._forward_prefill(
+                    q[dp_start:dp_end],
+                    kv_c_normed[dp_start:dp_end],
+                    k_pe[dp_start:dp_end],
+                    kv_c_and_k_pe_cache,
+                    dp_attn_metadata,
+                    k_scale,
+                    output[dp_start:dp_end],
+                )
+            return
 
         has_context = attn_metadata.prefill.chunked_context is not None
         kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
