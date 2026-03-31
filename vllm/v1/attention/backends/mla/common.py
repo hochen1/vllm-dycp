@@ -580,63 +580,55 @@ def split_metadata(
             dycp_seq_tot = [
                 dycp_cu_seq_lens[i, n_dycp].item() for i in range(num_chunks)
             ]
-            if any(int(t) > 0 for t in dycp_seq_tot):
-                dycp_max_seq_lens = [
-                    dycp_seq_lens[i].max().item() if dycp_seq_lens[i].numel() > 0 else 0
-                    for i in range(num_chunks)
-                ]
-                # token_to_seq: (num_chunks, max_token_num) - need to filter
-                # tokens belonging to dycp requests (seq_idx < n_dycp)
-                max_dycp_tokens = max(dycp_seq_tot)
-                dycp_token_to_seq = (
-                    cc.token_to_seq[:, :max_dycp_tokens]
-                    if max_dycp_tokens > 0
-                    else cc.token_to_seq[:, :0]
-                )
-                dycp_chunk_total_token = [
-                    dycp_cu_seq_lens[i, n_dycp].item() for i in range(num_chunks)
-                ]
+            dycp_max_seq_lens = [
+                dycp_seq_lens[i].max().item() if dycp_seq_lens[i].numel() > 0 else 0
+                for i in range(num_chunks)
+            ]
+            # token_to_seq: (num_chunks, max_token_num) - need to filter
+            # tokens belonging to dycp requests (seq_idx < n_dycp)
+            max_dycp_tokens = max(dycp_seq_tot) if dycp_seq_tot else 0
+            dycp_token_to_seq = (
+                cc.token_to_seq[:, :max_dycp_tokens]
+                if max_dycp_tokens > 0
+                else cc.token_to_seq[:, :0]
+            )
+            dycp_chunk_total_token = [
+                dycp_cu_seq_lens[i, n_dycp].item() for i in range(num_chunks)
+            ]
 
-                dycp_chunked_context = MLACommonPrefillMetadata.ChunkedContextMetadata(
-                    cu_seq_lens=dycp_cu_seq_lens,
-                    starts=dycp_starts,
-                    seq_tot=dycp_seq_tot,
-                    max_seq_lens=dycp_max_seq_lens,
-                    seq_lens=dycp_seq_lens,
-                    workspace=cc.workspace,
-                    token_to_seq=dycp_token_to_seq,
-                    chunk_total_token=dycp_chunk_total_token,
-                    padded_local_chunk_seq_lens=(
-                        [s[:n_dycp] for s in cc.padded_local_chunk_seq_lens]
-                        if cc.padded_local_chunk_seq_lens is not None
-                        else None
-                    ),
-                    local_context_lens_allranks=(
-                        # Shape is [num_prefills, cp_world_size], so slice request dim.
-                        cc.local_context_lens_allranks[:n_dycp]
-                        if cc.local_context_lens_allranks is not None
-                        else None
-                    ),
-                    padded_local_cu_seq_lens=(
-                        cc.padded_local_cu_seq_lens[:, : n_dycp + 1]
-                        if cc.padded_local_cu_seq_lens is not None
-                        else None
-                    ),
-                    cu_seq_lens_lst=(
-                        # Keep the leading 0 and the cumulative end offset.
-                        [s[: n_dycp + 1] for s in cc.cu_seq_lens_lst]
-                        if cc.cu_seq_lens_lst is not None
-                        else None
-                    ),
-                    chunk_size=cc.chunk_size,
-                )
-            else:
-                logger.info(
-                    "chenxiao--debug split_metadata_dycp_no_context "
-                    "n_dycp=%d num_chunks=%d",
-                    int(n_dycp),
-                    int(num_chunks),
-                )
+            dycp_chunked_context = MLACommonPrefillMetadata.ChunkedContextMetadata(
+                cu_seq_lens=dycp_cu_seq_lens,
+                starts=dycp_starts,
+                seq_tot=dycp_seq_tot,
+                max_seq_lens=dycp_max_seq_lens,
+                seq_lens=dycp_seq_lens,
+                workspace=cc.workspace,
+                token_to_seq=dycp_token_to_seq,
+                chunk_total_token=dycp_chunk_total_token,
+                padded_local_chunk_seq_lens=(
+                    [s[:n_dycp] for s in cc.padded_local_chunk_seq_lens]
+                    if cc.padded_local_chunk_seq_lens is not None
+                    else None
+                ),
+                local_context_lens_allranks=(
+                    # Shape is [num_prefills, cp_world_size], so slice request dim.
+                    cc.local_context_lens_allranks[:n_dycp]
+                    if cc.local_context_lens_allranks is not None
+                    else None
+                ),
+                padded_local_cu_seq_lens=(
+                    cc.padded_local_cu_seq_lens[:, : n_dycp + 1]
+                    if cc.padded_local_cu_seq_lens is not None
+                    else None
+                ),
+                cu_seq_lens_lst=(
+                    # Keep the leading 0 and the cumulative end offset.
+                    [s[: n_dycp + 1] for s in cc.cu_seq_lens_lst]
+                    if cc.cu_seq_lens_lst is not None
+                    else None
+                ),
+                chunk_size=cc.chunk_size,
+            )
 
         dycp_prefill = type(pfx)(
             block_table=dycp_block_table,
@@ -712,88 +704,80 @@ def split_metadata(
             dp_seq_tot = [
                 dp_cu_seq_lens[i, -1].item() for i in range(num_chunks)
             ]
-            if any(int(t) > 0 for t in dp_seq_tot):
-                dp_max_seq_lens = [
-                    dp_seq_lens[i].max().item() if dp_seq_lens[i].numel() > 0 else 0
-                    for i in range(num_chunks)
-                ]
-                # For token_to_seq, dp tokens start after dycp tokens in each chunk
-                dp_token_to_seq_list = []
-                for i in range(num_chunks):
-                    dycp_chunk_tokens = (
-                        cc.cu_seq_lens[i, n_dycp].item()
-                        if cc.cu_seq_lens.shape[1] > n_dycp
-                        else 0
-                    )
-                    dp_chunk_tokens = dp_seq_tot[i]
-                    if dp_chunk_tokens > 0:
-                        # Extract dp portion and remap seq indices
-                        chunk_t2s = cc.token_to_seq[
-                            i, dycp_chunk_tokens : dycp_chunk_tokens + dp_chunk_tokens
-                        ]
-                        dp_token_to_seq_list.append(chunk_t2s - n_dycp)
-                    else:
-                        dp_token_to_seq_list.append(cc.token_to_seq.new_empty(0))
-                max_dp_tokens = max(dp_seq_tot) if dp_seq_tot else 0
-                dp_token_to_seq = (
-                    torch.zeros(
-                        [num_chunks, max_dp_tokens],
-                        dtype=cc.token_to_seq.dtype,
-                        device=cc.token_to_seq.device,
-                    )
-                    if max_dp_tokens > 0
-                    else cc.token_to_seq[:, :0]
+            dp_max_seq_lens = [
+                dp_seq_lens[i].max().item() if dp_seq_lens[i].numel() > 0 else 0
+                for i in range(num_chunks)
+            ]
+            # For token_to_seq, dp tokens start after dycp tokens in each chunk
+            dp_token_to_seq_list = []
+            for i in range(num_chunks):
+                dycp_chunk_tokens = (
+                    cc.cu_seq_lens[i, n_dycp].item()
+                    if cc.cu_seq_lens.shape[1] > n_dycp
+                    else 0
                 )
-                for i in range(num_chunks):
-                    if dp_seq_tot[i] > 0:
-                        dp_token_to_seq[i, : dp_seq_tot[i]] = dp_token_to_seq_list[i]
+                dp_chunk_tokens = dp_seq_tot[i]
+                if dp_chunk_tokens > 0:
+                    # Extract dp portion and remap seq indices
+                    chunk_t2s = cc.token_to_seq[
+                        i, dycp_chunk_tokens : dycp_chunk_tokens + dp_chunk_tokens
+                    ]
+                    dp_token_to_seq_list.append(chunk_t2s - n_dycp)
+                else:
+                    dp_token_to_seq_list.append(cc.token_to_seq.new_empty(0))
+            max_dp_tokens = max(dp_seq_tot) if dp_seq_tot else 0
+            dp_token_to_seq = (
+                torch.zeros(
+                    [num_chunks, max_dp_tokens],
+                    dtype=cc.token_to_seq.dtype,
+                    device=cc.token_to_seq.device,
+                )
+                if max_dp_tokens > 0
+                else cc.token_to_seq[:, :0]
+            )
+            for i in range(num_chunks):
+                if dp_seq_tot[i] > 0:
+                    dp_token_to_seq[i, : dp_seq_tot[i]] = dp_token_to_seq_list[i]
 
-                dp_chunk_total_token = dp_seq_tot
+            dp_chunk_total_token = dp_seq_tot
 
-                dp_chunked_context = MLACommonPrefillMetadata.ChunkedContextMetadata(
-                    cu_seq_lens=dp_cu_seq_lens,
-                    starts=dp_starts,
-                    seq_tot=dp_seq_tot,
-                    max_seq_lens=dp_max_seq_lens,
-                    seq_lens=dp_seq_lens,
-                    workspace=cc.workspace,
-                    token_to_seq=dp_token_to_seq,
-                    chunk_total_token=dp_chunk_total_token,
-                    padded_local_chunk_seq_lens=(
-                        [s[n_dycp:] for s in cc.padded_local_chunk_seq_lens]
-                        if cc.padded_local_chunk_seq_lens is not None
-                        else None
-                    ),
-                    local_context_lens_allranks=(
-                        # Shape is [num_prefills, cp_world_size], so slice request dim.
-                        cc.local_context_lens_allranks[n_dycp:]
-                        if cc.local_context_lens_allranks is not None
-                        else None
-                    ),
-                    padded_local_cu_seq_lens=(
-                        cc.padded_local_cu_seq_lens[:, n_dycp:]
-                        - cc.padded_local_cu_seq_lens[:, n_dycp : n_dycp + 1]
-                        if cc.padded_local_cu_seq_lens is not None
-                        else None
-                    ),
-                    cu_seq_lens_lst=(
-                        # Re-base cumulative offsets to start at 0 for dp sub-batch.
-                        [
-                            [v - s[n_dycp] for v in s[n_dycp:]]
-                            for s in cc.cu_seq_lens_lst
-                        ]
-                        if cc.cu_seq_lens_lst is not None
-                        else None
-                    ),
-                    chunk_size=cc.chunk_size,
-                )
-            else:
-                logger.info(
-                    "chenxiao--debug split_metadata_dp_no_context "
-                    "n_dp=%d num_chunks=%d",
-                    int(n_dp),
-                    int(num_chunks),
-                )
+            dp_chunked_context = MLACommonPrefillMetadata.ChunkedContextMetadata(
+                cu_seq_lens=dp_cu_seq_lens,
+                starts=dp_starts,
+                seq_tot=dp_seq_tot,
+                max_seq_lens=dp_max_seq_lens,
+                seq_lens=dp_seq_lens,
+                workspace=cc.workspace,
+                token_to_seq=dp_token_to_seq,
+                chunk_total_token=dp_chunk_total_token,
+                padded_local_chunk_seq_lens=(
+                    [s[n_dycp:] for s in cc.padded_local_chunk_seq_lens]
+                    if cc.padded_local_chunk_seq_lens is not None
+                    else None
+                ),
+                local_context_lens_allranks=(
+                    # Shape is [num_prefills, cp_world_size], so slice request dim.
+                    cc.local_context_lens_allranks[n_dycp:]
+                    if cc.local_context_lens_allranks is not None
+                    else None
+                ),
+                padded_local_cu_seq_lens=(
+                    cc.padded_local_cu_seq_lens[:, n_dycp:]
+                    - cc.padded_local_cu_seq_lens[:, n_dycp : n_dycp + 1]
+                    if cc.padded_local_cu_seq_lens is not None
+                    else None
+                ),
+                cu_seq_lens_lst=(
+                    # Re-base cumulative offsets to start at 0 for dp sub-batch.
+                    [
+                        [v - s[n_dycp] for v in s[n_dycp:]]
+                        for s in cc.cu_seq_lens_lst
+                    ]
+                    if cc.cu_seq_lens_lst is not None
+                    else None
+                ),
+                chunk_size=cc.chunk_size,
+            )
 
         dp_prefill = type(pfx)(
             block_table=dp_block_table,
@@ -2641,13 +2625,10 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         output = None
         iters = len(prefill_metadata.chunked_context.seq_tot)
         workspace = prefill_metadata.chunked_context.workspace
-        skipped_empty_chunks = 0
+        q_tokens = int(q.shape[0])
 
         for i in range(iters):
-            toks = int(prefill_metadata.chunked_context.seq_tot[i])
-            if toks <= 0:
-                skipped_empty_chunks += 1
-                continue
+            toks = prefill_metadata.chunked_context.seq_tot[i]
             ops.cp_gather_cache(
                 src_cache=kv_c_and_k_pe_cache,
                 dst=workspace,
@@ -2701,6 +2682,10 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 chunk_idx=i,
                 toks=toks,
             )
+            if q_tokens == 0:
+                # Some DyCP ranks can have zero local query tokens while still
+                # needing to participate in context all-gather.
+                continue
 
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
@@ -2733,25 +2718,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 output = output_tmp
                 output_lse = output_lse_tmp
 
-        if skipped_empty_chunks > 0:
-            logger.info(
-                "chenxiao--debug cp_prefill_context_skip_empty_summary "
-                "skipped=%d total=%d cp_world_size=%d num_prefills=%d",
-                int(skipped_empty_chunks),
-                int(iters),
-                int(cp_world_size),
-                int(attn_metadata.num_prefills),
-            )
-
         if output is None:
-            q_tokens = int(q.shape[0])
-            logger.info(
-                "chenxiao--debug cp_prefill_context_all_empty "
-                "cp_world_size=%d num_prefills=%d q_tokens=%d",
-                int(cp_world_size),
-                int(attn_metadata.num_prefills),
-                q_tokens,
-            )
             return (
                 q.new_zeros((q_tokens, self.num_heads, self.v_head_dim)),
                 torch.full(
@@ -2780,6 +2747,27 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         assert self.pcp_world_size is not None
 
         has_context = attn_metadata.prefill.chunked_context is not None
+        num_prefill_tokens = int(q.shape[0])
+        if num_prefill_tokens == 0:
+            if has_context:
+                if (self.dcp_world_size * self.pcp_world_size > 1):
+                    self._context_parallel_compute_prefill_context(
+                        q,
+                        kv_c_and_k_pe_cache,
+                        attn_metadata,
+                        k_scale=None,
+                        cp_world_size=self.dcp_world_size * self.pcp_world_size,
+                    )
+                elif (self.dycp_world_size > 1 and attn_metadata.num_dycp_reqs > 0):
+                    self._context_parallel_compute_prefill_context(
+                        q,
+                        kv_c_and_k_pe_cache,
+                        attn_metadata,
+                        k_scale=None,
+                        cp_world_size=self.dycp_world_size,
+                    )
+            return
+
         kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
             -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
         )
