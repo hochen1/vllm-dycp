@@ -159,7 +159,7 @@ class CrossDPScheduler(Scheduler):
         assert self.max_cp_tokens >= self.graph_size_for_cp, "max_cp_tokens should be greater than or equal to graph_size_for_cp"
         # Request queue control the token threshold for long requests.
         self.waiting = LongShortRequestQueue(
-            long_request_threshold=128 * 1024,
+            long_request_threshold=1 * 1024,
             max_long_requests=self.max_cp_tokens,
         )
         self.request_manager = RequestManager(
