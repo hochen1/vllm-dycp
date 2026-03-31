@@ -1,14 +1,12 @@
-root@gpulingjun010011017023:/input/chenxiao.cx/workspace/bench16# py-spy dump -p 240483
-Process 240483: VLLM::Worker_Domain0_DP1_EP1
-Python v3.12.3 (/usr/bin/python3.12)
-
-Thread 240483 (active): "MainThread"
-    __call__ (torch/_ops.py:1255)
-    merge_attn_states (vllm/_custom_ops.py:192)
-    merge_attn_states (vllm/attention/ops/merge_attn_states.py:44)
-    _forward_prefill (vllm/v1/attention/backends/mla/common.py:2677)
-    forward_common (vllm/v1/attention/backends/mla/common.py:2923)
-    forward (vllm/v1/attention/backends/mla/common.py:2728)
+Thread 243216 (active): "MainThread"
+    _init_handles (triton/compiler/compiler.py:474)
+    launch_metadata (triton/compiler/compiler.py:490)
+    run (triton/runtime/jit.py:756)
+    <lambda> (triton/runtime/jit.py:419)
+    merge_attn_states (vllm/attention/ops/triton_merge_attn_states.py:29)
+    _forward_prefill (vllm/v1/attention/backends/mla/common.py:2699)
+    forward_common (vllm/v1/attention/backends/mla/common.py:2960)
+    forward (vllm/v1/attention/backends/mla/common.py:2765)
     unified_mla_attention_with_output (vllm/attention/layer.py:938)
     wrapper (vllm/attention/utils/kv_transfer_utils.py:39)
     __call__ (torch/_ops.py:1255)
@@ -44,7 +42,7 @@ Thread 240483 (active): "MainThread"
     _main (multiprocessing/spawn.py:135)
     spawn_main (multiprocessing/spawn.py:122)
     <module> (<string>:1)
-Thread 240531 (idle): "WorkerDeathMonitor"
+Thread 243269 (idle): "WorkerDeathMonitor"
     _recv (multiprocessing/connection.py:395)
     _recv_bytes (multiprocessing/connection.py:430)
     recv (multiprocessing/connection.py:250)
@@ -52,36 +50,38 @@ Thread 240531 (idle): "WorkerDeathMonitor"
     run (threading.py:1010)
     _bootstrap_inner (threading.py:1073)
     _bootstrap (threading.py:1030)
-Thread 240536 (idle): "WorkerAsyncOutputCopy"
+Thread 243275 (idle): "WorkerAsyncOutputCopy"
     wait (threading.py:355)
     get (queue.py:171)
     async_output_busy_loop (vllm/v1/executor/multiproc_executor.py:1063)
     run (threading.py:1010)
     _bootstrap_inner (threading.py:1073)
     _bootstrap (threading.py:1030)
-Thread 241049 (idle): "Thread-1 (_report_usage_worker)"
+Thread 243803 (idle): "Thread-1 (_report_usage_worker)"
     _report_continuous_usage (vllm/usage/usage_lib.py:268)
     _report_usage_worker (vllm/usage/usage_lib.py:175)
     run (threading.py:1010)
     _bootstrap_inner (threading.py:1073)
     _bootstrap (threading.py:1030)
-Thread 241161 (idle): "Thread-2"
+Thread 243897 (idle): "Thread-2"
     wait (threading.py:359)
     wait (threading.py:655)
     run (tqdm/_monitor.py:60)
     _bootstrap_inner (threading.py:1073)
     _bootstrap (threading.py:1030)
-root@gpulingjun010011017023:/input/chenxiao.cx/workspace/bench16# py-spy dump -p 240482
-Process 240482: VLLM::Worker_Domain0_DP0_EP0
+root@gpulingjun010011017023:/input/chenxiao.cx/workspace/bench16# py-spy dump -p 243217
+Process 243217: VLLM::Worker_Domain0_DP1_EP1
 Python v3.12.3 (/usr/bin/python3.12)
 
-Thread 240482 (active): "MainThread"
-    __call__ (torch/_ops.py:1255)
-    merge_attn_states (vllm/_custom_ops.py:192)
-    merge_attn_states (vllm/attention/ops/merge_attn_states.py:44)
-    _forward_prefill (vllm/v1/attention/backends/mla/common.py:2677)
-    forward_common (vllm/v1/attention/backends/mla/common.py:2923)
-    forward (vllm/v1/attention/backends/mla/common.py:2728)
+Thread 243217 (active): "MainThread"
+    _init_handles (triton/compiler/compiler.py:474)
+    launch_metadata (triton/compiler/compiler.py:490)
+    run (triton/runtime/jit.py:756)
+    <lambda> (triton/runtime/jit.py:419)
+    merge_attn_states (vllm/attention/ops/triton_merge_attn_states.py:29)
+    _forward_prefill (vllm/v1/attention/backends/mla/common.py:2699)
+    forward_common (vllm/v1/attention/backends/mla/common.py:2960)
+    forward (vllm/v1/attention/backends/mla/common.py:2765)
     unified_mla_attention_with_output (vllm/attention/layer.py:938)
     wrapper (vllm/attention/utils/kv_transfer_utils.py:39)
     __call__ (torch/_ops.py:1255)
@@ -117,7 +117,7 @@ Thread 240482 (active): "MainThread"
     _main (multiprocessing/spawn.py:135)
     spawn_main (multiprocessing/spawn.py:122)
     <module> (<string>:1)
-Thread 240533 (idle): "WorkerDeathMonitor"
+Thread 243270 (idle): "WorkerDeathMonitor"
     _recv (multiprocessing/connection.py:395)
     _recv_bytes (multiprocessing/connection.py:430)
     recv (multiprocessing/connection.py:250)
@@ -125,20 +125,20 @@ Thread 240533 (idle): "WorkerDeathMonitor"
     run (threading.py:1010)
     _bootstrap_inner (threading.py:1073)
     _bootstrap (threading.py:1030)
-Thread 240539 (idle): "WorkerAsyncOutputCopy"
+Thread 243273 (idle): "WorkerAsyncOutputCopy"
     wait (threading.py:355)
     get (queue.py:171)
     async_output_busy_loop (vllm/v1/executor/multiproc_executor.py:1063)
     run (threading.py:1010)
     _bootstrap_inner (threading.py:1073)
     _bootstrap (threading.py:1030)
-Thread 241107 (idle): "Thread-1 (_report_usage_worker)"
+Thread 243810 (idle): "Thread-1 (_report_usage_worker)"
     _report_continuous_usage (vllm/usage/usage_lib.py:268)
     _report_usage_worker (vllm/usage/usage_lib.py:175)
     run (threading.py:1010)
     _bootstrap_inner (threading.py:1073)
     _bootstrap (threading.py:1030)
-Thread 241166 (idle): "Thread-2"
+Thread 243883 (idle): "Thread-2"
     wait (threading.py:359)
     wait (threading.py:655)
     run (tqdm/_monitor.py:60)
