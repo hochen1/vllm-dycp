@@ -2025,20 +2025,30 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
         decode_dycp_reqs = min(attn_metadata.num_dycp_reqs, attn_metadata.num_decodes)
         decode_dycp_tokens = 0
+        total_dycp_tokens = int(attn_metadata.num_dycp_tokens)
         if decode_dycp_reqs > 0:
             decode_dycp_tokens = int(
                 attn_metadata.query_start_loc[decode_dycp_reqs].item()
             )
-
-        gathered_start = decode_dycp_tokens * self.dycp_world_size
-        gathered_end = (
-            decode_dycp_tokens + dycp_prefill_tokens
-        ) * self.dycp_world_size
         restore_idx = attn_metadata.pcp_allgather_restore_idx[
-            gathered_start:gathered_end
+            : total_dycp_tokens * self.dycp_world_size
         ]
-        if restore_idx.numel() > 0 and gathered_start > 0:
-            restore_idx = restore_idx - gathered_start
+        if decode_dycp_tokens > 0 and restore_idx.numel() > 0:
+            restore_idx = restore_idx.to(
+                device=kv_c_normed.device,
+                dtype=torch.int64,
+                non_blocking=True,
+            )
+            token_offsets = torch.remainder(restore_idx, total_dycp_tokens)
+            keep_mask = token_offsets >= decode_dycp_tokens
+            restore_idx = restore_idx[keep_mask]
+            token_offsets = token_offsets[keep_mask] - decode_dycp_tokens
+            rank_offsets = torch.div(
+                restore_idx,
+                total_dycp_tokens,
+                rounding_mode="floor",
+            )
+            restore_idx = rank_offsets * dycp_prefill_tokens + token_offsets
 
         return pcp_kv_allgather_and_restore(
             kv_c_normed,
@@ -2049,7 +2059,14 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         )
 
     def _run_prefill_new_tokens_fa(
-        self, prefill: MLACommonPrefillMetadata, q, k, v, return_softmax_lse
+        self,
+        prefill: MLACommonPrefillMetadata,
+        q,
+        k,
+        v,
+        return_softmax_lse,
+        local_k: torch.Tensor | None = None,
+        local_v: torch.Tensor | None = None,
     ):
         assert self.pcp_world_size is not None
         assert self.pcp_rank is not None
@@ -2062,6 +2079,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 return_softmax_lse,
                 self.pcp_rank,
                 self.pcp_world_size,
+                local_k=local_k,
+                local_v=local_v,
             )
         elif self.dycp_world_size > 1 and prefill.num_dycp_reqs > 0:
             return self._run_dual_chunk_prefill_new_tokens(
@@ -2072,6 +2091,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 return_softmax_lse,
                 self.dycp_rank,
                 self.dycp_world_size,
+                local_k=local_k,
+                local_v=local_v,
             )
         else:
             return self._flash_attn_varlen_diff_headdims(
@@ -2088,7 +2109,14 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             )
 
     def _run_prefill_new_tokens_fi(
-        self, prefill: MLACommonPrefillMetadata, q, k, v, return_softmax_lse
+        self,
+        prefill: MLACommonPrefillMetadata,
+        q,
+        k,
+        v,
+        return_softmax_lse,
+        local_k: torch.Tensor | None = None,
+        local_v: torch.Tensor | None = None,
     ):
         assert isinstance(prefill, FlashInferPrefillMetadata)
         assert prefill.prefill_main is not None
@@ -2106,7 +2134,14 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         return ret
 
     def _run_prefill_new_tokens_cudnn(
-        self, prefill: MLACommonPrefillMetadata, q, k, v, return_softmax_lse
+        self,
+        prefill: MLACommonPrefillMetadata,
+        q,
+        k,
+        v,
+        return_softmax_lse,
+        local_k: torch.Tensor | None = None,
+        local_v: torch.Tensor | None = None,
     ):
         assert isinstance(prefill, CudnnPrefillMetadata)
         assert prefill.query_seq_lens is not None
@@ -2141,6 +2176,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         return_softmax_lse: bool,
         cp_rank: int,
         cp_world_size: int,
+        local_k: torch.Tensor | None = None,
+        local_v: torch.Tensor | None = None,
     ):
         pcp_metadata = prefill.pcp_metadata
         assert pcp_metadata is not None
@@ -2158,10 +2195,12 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     - unsplit_query_start_loc[:-1]
                 ).max().item()
             )
+            unsplit_k = k if local_k is None else local_k
+            unsplit_v = v if local_v is None else local_v
             unsplit_ret = self._flash_attn_varlen_diff_headdims(
                 q=q[:unsplit_num_tokens],
-                k=k[:unsplit_num_tokens],
-                v=v[:unsplit_num_tokens],
+                k=unsplit_k[:unsplit_num_tokens],
+                v=unsplit_v[:unsplit_num_tokens],
                 cu_seqlens_q=unsplit_query_start_loc,
                 cu_seqlens_k=unsplit_query_start_loc,
                 max_seqlen_q=unsplit_max_query_len,
@@ -2325,7 +2364,14 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         )
 
     def _run_prefill_new_tokens_trtllm_ragged(
-        self, prefill: MLACommonPrefillMetadata, q, k, v, return_softmax_lse
+        self,
+        prefill: MLACommonPrefillMetadata,
+        q,
+        k,
+        v,
+        return_softmax_lse,
+        local_k: torch.Tensor | None = None,
+        local_v: torch.Tensor | None = None,
     ):
         """TRT-LLM ragged attention for new tokens (causal)."""
         from flashinfer.prefill import trtllm_ragged_attention_deepseek
@@ -2716,6 +2762,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         attn_metadata: MLACommonMetadata,
         k_scale: torch.Tensor,
         output: torch.Tensor,
+        local_kv_c_normed: torch.Tensor | None = None,
+        local_k_pe: torch.Tensor | None = None,
     ) -> None:
         # TODO (zyongye): Prefill function here
         assert attn_metadata.prefill is not None
@@ -2736,8 +2784,10 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             )
 
             if dycp_attn_metadata is not None and dycp_num_tokens > 0:
-                dycp_kv_c_normed = kv_c_normed[:dycp_num_tokens]
-                dycp_k_pe = k_pe[:dycp_num_tokens]
+                local_dycp_kv_c_normed = kv_c_normed[:dycp_num_tokens]
+                local_dycp_k_pe = k_pe[:dycp_num_tokens]
+                dycp_kv_c_normed = local_dycp_kv_c_normed
+                dycp_k_pe = local_dycp_k_pe
                 if attn_metadata.num_decodes > 0:
                     dycp_kv_c_normed, dycp_k_pe = (
                         self._allgather_mixed_dycp_prefill_kv(
@@ -2755,6 +2805,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     dycp_attn_metadata,
                     k_scale,
                     output[:dycp_num_tokens],
+                    local_kv_c_normed=local_dycp_kv_c_normed,
+                    local_k_pe=local_dycp_k_pe,
                 )
 
             if dp_attn_metadata is not None and dp_attn_metadata.num_actual_tokens > 0:
@@ -2768,6 +2820,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     dp_attn_metadata,
                     k_scale,
                     output[dp_start:dp_end],
+                    local_kv_c_normed=kv_c_normed[dp_start:dp_end],
+                    local_k_pe=k_pe[dp_start:dp_end],
                 )
             return
 
@@ -2778,6 +2832,16 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
         k = self._concat_k_nope_k_pe(k_nope, k_pe)
+        local_k = None
+        local_v = None
+        if local_kv_c_normed is not None and local_k_pe is not None:
+            local_kv_nope = self.kv_b_proj(local_kv_c_normed)[0].view(
+                -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
+            )
+            local_k_nope, local_v = local_kv_nope.split(
+                [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+            )
+            local_k = self._concat_k_nope_k_pe(local_k_nope, local_k_pe)
 
         output_prefill = self._run_prefill_new_tokens(
             prefill=attn_metadata.prefill,
@@ -2785,6 +2849,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             k=k,
             v=v,
             return_softmax_lse=has_context,
+            local_k=local_k,
+            local_v=local_v,
         )
 
         if has_context:
@@ -3071,6 +3137,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 prefill_k_start = num_decode_tokens * self.dycp_world_size
             prefill_k_pe = k_pe[prefill_k_start:]
             prefill_k_c_normed = k_c_normed[prefill_k_start:]
+            local_prefill_k_pe = local_k_pe[num_decode_tokens:]
+            local_prefill_k_c_normed = local_k_c_normed[num_decode_tokens:]
             self._forward_prefill(
                 prefill_q,
                 prefill_k_c_normed,
@@ -3079,6 +3147,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 attn_metadata,
                 layer._k_scale,
                 output=output[num_decode_tokens:],
+                local_kv_c_normed=local_prefill_k_c_normed,
+                local_k_pe=local_prefill_k_pe,
             )
 
         if has_decode:
