@@ -319,12 +319,18 @@ def merge_attn_states_torch(
     p_lse = torch.where(torch.isinf(prefix_lse) & (prefix_lse > 0), neg_inf, prefix_lse)
     s_lse = torch.where(torch.isinf(suffix_lse) & (suffix_lse > 0), neg_inf, suffix_lse)
     max_lse = torch.maximum(p_lse, s_lse)
-    p_se = torch.exp(p_lse - max_lse)
-    s_se = torch.exp(s_lse - max_lse)
+    both_neg_inf = torch.isneginf(p_lse) & torch.isneginf(s_lse)
+    p_diff = torch.where(both_neg_inf, torch.zeros_like(p_lse), p_lse - max_lse)
+    s_diff = torch.where(both_neg_inf, torch.zeros_like(s_lse), s_lse - max_lse)
+    p_se = torch.exp(p_diff)
+    s_se = torch.exp(s_diff)
     out_se = p_se + s_se
 
-    p_scale = (p_se / out_se).transpose(0, 1).unsqueeze(-1)
-    s_scale = (s_se / out_se).transpose(0, 1).unsqueeze(-1)
+    safe_denom = torch.where(out_se > 0, out_se, torch.ones_like(out_se))
+    p_scale = torch.where(out_se > 0, p_se / safe_denom, torch.zeros_like(p_se))
+    s_scale = torch.where(out_se > 0, s_se / safe_denom, torch.zeros_like(s_se))
+    p_scale = p_scale.transpose(0, 1).unsqueeze(-1)
+    s_scale = s_scale.transpose(0, 1).unsqueeze(-1)
     merged = (
         prefix_output.to(torch.float32) * p_scale.to(torch.float32)
         + suffix_output.to(torch.float32) * s_scale.to(torch.float32)
@@ -2227,6 +2233,64 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         assert prefill.chunked_context is not None
         cu_seqlens_q = prefill.query_start_loc
         cu_seqlens_k = prefill.chunked_context.cu_seq_lens[chunk_idx]
+        q_tokens = int(q.shape[0])
+        k_tokens = int(k.shape[0])
+        if int(cu_seqlens_q[-1].item()) != q_tokens:
+            logger.info(
+                "chenxiao--debug prefill_context_q_cu_mismatch "
+                "chunk_idx=%d q_tokens=%d q_end=%d q_shape=%s",
+                int(chunk_idx),
+                q_tokens,
+                int(cu_seqlens_q[-1].item()),
+                tuple(q.shape),
+            )
+            raise RuntimeError(
+                "prefill context q cu-seqlens mismatch: "
+                f"q_tokens={q_tokens}, q_end={int(cu_seqlens_q[-1].item())}"
+            )
+
+        if k_tokens == 0:
+            return (
+                q.new_zeros((q_tokens, self.num_heads, self.v_head_dim)),
+                torch.full(
+                    (self.num_heads, q_tokens),
+                    float("-inf"),
+                    device=q.device,
+                    dtype=torch.float32,
+                ),
+            )
+
+        # Guard FA against malformed k cu-seqlens that can lead to kernel hang.
+        cu_k = cu_seqlens_k
+        if cu_k.device != k.device or cu_k.dtype != torch.int32:
+            cu_k = cu_k.to(device=k.device, dtype=torch.int32, non_blocking=True)
+        cu_k = torch.clamp(cu_k, 0, k_tokens)
+        if cu_k.numel() > 1:
+            cu_k = torch.cummax(cu_k, dim=0).values
+        k_end = int(cu_k[-1].item())
+        if k_end == 0:
+            return (
+                q.new_zeros((q_tokens, self.num_heads, self.v_head_dim)),
+                torch.full(
+                    (self.num_heads, q_tokens),
+                    float("-inf"),
+                    device=q.device,
+                    dtype=torch.float32,
+                ),
+            )
+        if k_end != k_tokens:
+            logger.info(
+                "chenxiao--debug prefill_context_k_cu_adjust "
+                "chunk_idx=%d k_tokens=%d k_end=%d",
+                int(chunk_idx),
+                k_tokens,
+                k_end,
+            )
+            k = k[:k_end]
+            v = v[:k_end]
+            k_tokens = k_end
+        cu_seqlens_k = cu_k
+
         if int(k.shape[0]) != int(v.shape[0]):
             logger.info(
                 "chenxiao--debug prefill_context_fa_input_mismatch "
@@ -2241,6 +2305,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 f"q={tuple(q.shape)} k={tuple(k.shape)} v={tuple(v.shape)}"
             )
         try:
+            max_seqlen_k = int(prefill.chunked_context.max_seq_lens[chunk_idx])
+            if max_seqlen_k > k_tokens:
+                max_seqlen_k = k_tokens
             return self._flash_attn_varlen_diff_headdims(
                 q=q,
                 k=k,
@@ -2248,7 +2315,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_k=cu_seqlens_k,
                 max_seqlen_q=prefill.max_query_len,
-                max_seqlen_k=prefill.chunked_context.max_seq_lens[chunk_idx],
+                max_seqlen_k=max_seqlen_k,
                 softmax_scale=self.scale,
                 causal=False,  # Context is unmasked
                 return_softmax_lse=True,
