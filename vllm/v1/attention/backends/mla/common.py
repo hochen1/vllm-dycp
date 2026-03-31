@@ -290,6 +290,52 @@ logger = init_logger(__name__)
 CUDNN_WORKSPACE_SIZE = 12800
 
 
+def merge_attn_states_torch(
+    output: torch.Tensor,
+    prefix_output: torch.Tensor,
+    prefix_lse: torch.Tensor,
+    suffix_output: torch.Tensor,
+    suffix_lse: torch.Tensor,
+    output_lse: torch.Tensor | None = None,
+) -> None:
+    """Pure PyTorch fallback for attention-state merge."""
+    if output.numel() == 0:
+        return
+
+    if output.shape != prefix_output.shape or output.shape != suffix_output.shape:
+        raise RuntimeError(
+            "merge_attn_states_torch output shape mismatch: "
+            f"output={tuple(output.shape)} prefix={tuple(prefix_output.shape)} "
+            f"suffix={tuple(suffix_output.shape)}"
+        )
+    if prefix_lse.shape != suffix_lse.shape:
+        raise RuntimeError(
+            "merge_attn_states_torch lse shape mismatch: "
+            f"prefix_lse={tuple(prefix_lse.shape)} suffix_lse={tuple(suffix_lse.shape)}"
+        )
+
+    neg_inf = torch.full_like(prefix_lse, float("-inf"))
+    # FA2 may return +inf for zero-length seq. Normalize to -inf first.
+    p_lse = torch.where(torch.isinf(prefix_lse) & (prefix_lse > 0), neg_inf, prefix_lse)
+    s_lse = torch.where(torch.isinf(suffix_lse) & (suffix_lse > 0), neg_inf, suffix_lse)
+    max_lse = torch.maximum(p_lse, s_lse)
+    p_se = torch.exp(p_lse - max_lse)
+    s_se = torch.exp(s_lse - max_lse)
+    out_se = p_se + s_se
+
+    p_scale = (p_se / out_se).transpose(0, 1).unsqueeze(-1)
+    s_scale = (s_se / out_se).transpose(0, 1).unsqueeze(-1)
+    merged = (
+        prefix_output.to(torch.float32) * p_scale.to(torch.float32)
+        + suffix_output.to(torch.float32) * s_scale.to(torch.float32)
+    )
+    output.copy_(merged.to(output.dtype))
+
+    if output_lse is not None:
+        out_lse = torch.log(out_se) + max_lse
+        output_lse.copy_(out_lse.to(output_lse.dtype))
+
+
 class MLACommonBackend(AttentionBackend):
     accept_output_buffer: bool = True
 
@@ -2675,6 +2721,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     f"suffix={tuple(suffix_output.shape)}"
                 )
             is_dycp_prefill = self.dycp_world_size > 1 and attn_metadata.num_dycp_reqs > 0
+            use_torch_merge = self.dycp_world_size > 1
             if is_dycp_prefill:
                 logger.info(
                     "chenxiao--debug merge_prefill_begin "
@@ -2690,25 +2737,29 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     tuple(context_lse.shape),
                     tuple(suffix_lse.shape),
                 )
-                # Work around potential hangs in the custom CUDA merge kernel
-                # on DyCP prefill mixed-length batches.
-                from vllm.attention.ops.triton_merge_attn_states import (
-                    merge_attn_states as triton_merge_attn_states,
+            elif use_torch_merge:
+                logger.info(
+                    "chenxiao--debug merge_prefill_non_dycp_begin "
+                    "dcp_rank=%d dycp_rank=%d dycp_ws=%d num_dycp_reqs=%d "
+                    "output=%s context=%s suffix=%s",
+                    int(self.dcp_rank if self.dcp_rank is not None else -1),
+                    int(self.dycp_rank if self.dycp_rank is not None else -1),
+                    int(self.dycp_world_size),
+                    int(attn_metadata.num_dycp_reqs),
+                    tuple(output.shape),
+                    tuple(context_output.shape),
+                    tuple(suffix_output.shape),
                 )
 
-                triton_merge_attn_states(
+            if use_torch_merge:
+                # Work around potential hangs in custom/Triton merge kernels
+                # on DyCP mixed-length batches.
+                merge_attn_states_torch(
                     output=output,
                     prefix_output=context_output,
                     prefix_lse=context_lse,
                     suffix_output=suffix_output,
                     suffix_lse=suffix_lse,
-                )
-                logger.info(
-                    "chenxiao--debug merge_prefill_end "
-                    "dcp_rank=%d dycp_rank=%d output=%s",
-                    int(self.dcp_rank if self.dcp_rank is not None else -1),
-                    int(self.dycp_rank if self.dycp_rank is not None else -1),
-                    tuple(output.shape),
                 )
             else:
                 merge_attn_states(
@@ -2717,6 +2768,23 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     prefix_lse=context_lse,
                     suffix_output=suffix_output,
                     suffix_lse=suffix_lse,
+                )
+
+            if is_dycp_prefill:
+                logger.info(
+                    "chenxiao--debug merge_prefill_end "
+                    "dcp_rank=%d dycp_rank=%d output=%s",
+                    int(self.dcp_rank if self.dcp_rank is not None else -1),
+                    int(self.dycp_rank if self.dycp_rank is not None else -1),
+                    tuple(output.shape),
+                )
+            elif use_torch_merge:
+                logger.info(
+                    "chenxiao--debug merge_prefill_non_dycp_end "
+                    "dcp_rank=%d dycp_rank=%d output=%s",
+                    int(self.dcp_rank if self.dcp_rank is not None else -1),
+                    int(self.dycp_rank if self.dycp_rank is not None else -1),
+                    tuple(output.shape),
                 )
         else:
             output_prefill = output_prefill[..., : v.shape[-1]].flatten(start_dim=-2)
