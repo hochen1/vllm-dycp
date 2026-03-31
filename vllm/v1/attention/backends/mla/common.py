@@ -2674,13 +2674,50 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     f"context={tuple(context_output.shape)}, "
                     f"suffix={tuple(suffix_output.shape)}"
                 )
-            merge_attn_states(
-                output=output,
-                prefix_output=context_output,
-                prefix_lse=context_lse,
-                suffix_output=suffix_output,
-                suffix_lse=suffix_lse,
-            )
+            is_dycp_prefill = self.dycp_world_size > 1 and attn_metadata.num_dycp_reqs > 0
+            if is_dycp_prefill:
+                logger.info(
+                    "chenxiao--debug merge_prefill_begin "
+                    "dcp_rank=%d dycp_rank=%d dycp_ws=%d num_dycp_reqs=%d "
+                    "output=%s context=%s suffix=%s context_lse=%s suffix_lse=%s",
+                    int(self.dcp_rank if self.dcp_rank is not None else -1),
+                    int(self.dycp_rank if self.dycp_rank is not None else -1),
+                    int(self.dycp_world_size),
+                    int(attn_metadata.num_dycp_reqs),
+                    tuple(output.shape),
+                    tuple(context_output.shape),
+                    tuple(suffix_output.shape),
+                    tuple(context_lse.shape),
+                    tuple(suffix_lse.shape),
+                )
+                # Work around potential hangs in the custom CUDA merge kernel
+                # on DyCP prefill mixed-length batches.
+                from vllm.attention.ops.triton_merge_attn_states import (
+                    merge_attn_states as triton_merge_attn_states,
+                )
+
+                triton_merge_attn_states(
+                    output=output,
+                    prefix_output=context_output,
+                    prefix_lse=context_lse,
+                    suffix_output=suffix_output,
+                    suffix_lse=suffix_lse,
+                )
+                logger.info(
+                    "chenxiao--debug merge_prefill_end "
+                    "dcp_rank=%d dycp_rank=%d output=%s",
+                    int(self.dcp_rank if self.dcp_rank is not None else -1),
+                    int(self.dycp_rank if self.dycp_rank is not None else -1),
+                    tuple(output.shape),
+                )
+            else:
+                merge_attn_states(
+                    output=output,
+                    prefix_output=context_output,
+                    prefix_lse=context_lse,
+                    suffix_output=suffix_output,
+                    suffix_lse=suffix_lse,
+                )
         else:
             output_prefill = output_prefill[..., : v.shape[-1]].flatten(start_dim=-2)
             output.copy_(output_prefill)
