@@ -361,6 +361,7 @@ class MLACommonPrefillMetadata:
         query_head_indices: torch.Tensor | None = None
         query_tail_indices: torch.Tensor | None = None
         output_restore_idx: torch.Tensor | None = None
+        num_unsplit_reqs: int = 0
 
     block_table: torch.Tensor
     query_start_loc: torch.Tensor
@@ -1408,22 +1409,65 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     <= self.chunked_prefill_workspace_size
                 )
             pcp_metadata = None
-            if self.pcp_world_size > 1:
-                # NOTE(yyj): We need to get the indices here for
-                # split the query, key and value in prefill forward.
-                q_head_idx, q_tail_idx = get_pcp_query_indices(
-                    prefill_query_start_loc_cpu
+            def _build_cp_prefill_metadata(
+                cp_prefill_query_start_loc_cpu: torch.Tensor,
+                cp_rank: int,
+                cp_world_size: int,
+            ) -> MLACommonPrefillMetadata.PCPMetadata:
+                query_seq_lens_cpu = (
+                    cp_prefill_query_start_loc_cpu[1:]
+                    - cp_prefill_query_start_loc_cpu[:-1]
                 )
-                output_res_idx = torch.cat([q_head_idx, q_tail_idx]).argsort()
-                prefill_kv_start_loc_cpu = (
-                    prefill_query_start_loc_cpu * self.pcp_world_size
+                num_unsplit_reqs = 0
+                if self.reorder_batch_threshold is not None:
+                    for query_len in query_seq_lens_cpu.tolist():
+                        if query_len <= self.reorder_batch_threshold:
+                            num_unsplit_reqs += 1
+                        else:
+                            break
+
+                unsplit_token_count = (
+                    int(cp_prefill_query_start_loc_cpu[num_unsplit_reqs].item())
+                    if num_unsplit_reqs > 0
+                    else 0
                 )
-                kv_head_idx, kv_tail_idx = get_pcp_kv_indices(
-                    prefill_kv_start_loc_cpu,
-                    self.pcp_rank,
-                    self.pcp_world_size,
+                split_query_start_loc_cpu = (
+                    cp_prefill_query_start_loc_cpu[num_unsplit_reqs:]
+                    - cp_prefill_query_start_loc_cpu[num_unsplit_reqs]
                 )
-                pcp_metadata = MLACommonPrefillMetadata.PCPMetadata(
+
+                if (
+                    split_query_start_loc_cpu.numel() > 1
+                    and int(split_query_start_loc_cpu[-1].item()) > 0
+                ):
+                    q_head_idx, q_tail_idx = get_pcp_query_indices(
+                        split_query_start_loc_cpu
+                    )
+                    output_res_idx = torch.cat([q_head_idx, q_tail_idx]).argsort()
+                    if unsplit_token_count > 0:
+                        q_head_idx += unsplit_token_count
+                        q_tail_idx += unsplit_token_count
+
+                    prefill_kv_start_loc_cpu = (
+                        split_query_start_loc_cpu * cp_world_size
+                    )
+                    kv_head_idx, kv_tail_idx = get_pcp_kv_indices(
+                        prefill_kv_start_loc_cpu,
+                        cp_rank,
+                        cp_world_size,
+                    )
+                    if unsplit_token_count > 0:
+                        kv_head_idx += unsplit_token_count
+                        kv_tail_idx += unsplit_token_count
+                else:
+                    empty_idx = torch.empty(0, dtype=torch.int64)
+                    q_head_idx = empty_idx
+                    q_tail_idx = empty_idx
+                    kv_head_idx = empty_idx
+                    kv_tail_idx = empty_idx
+                    output_res_idx = empty_idx
+
+                return MLACommonPrefillMetadata.PCPMetadata(
                     kv_head_indices=kv_head_idx.to(
                         device, dtype=torch.int32, non_blocking=True
                     ),
@@ -1439,40 +1483,26 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     output_restore_idx=output_res_idx.to(
                         device, dtype=torch.int32, non_blocking=True
                     ),
+                    num_unsplit_reqs=num_unsplit_reqs,
+                )
+
+            if self.pcp_world_size > 1:
+                # NOTE(yyj): We need to get the indices here for
+                # split the query, key and value in prefill forward.
+                pcp_metadata = _build_cp_prefill_metadata(
+                    prefill_query_start_loc_cpu,
+                    self.pcp_rank,
+                    self.pcp_world_size,
                 )
             elif self.dycp_world_size > 1 and prefill_num_dycp_reqs > 0:
                 # NOTE(yyj): We need to get the indices here for
                 # split the query, key and value in prefill forward.
                 # Only process dycp requests
                 cp_prefill_query_start_loc_cpu = prefill_query_start_loc_cpu[:prefill_num_dycp_reqs + 1]
-                q_head_idx, q_tail_idx = get_pcp_query_indices(
-                    cp_prefill_query_start_loc_cpu
-                )
-                output_res_idx = torch.cat([q_head_idx, q_tail_idx]).argsort()
-                prefill_kv_start_loc_cpu = (
-                    cp_prefill_query_start_loc_cpu * self.dycp_world_size
-                )
-                kv_head_idx, kv_tail_idx = get_pcp_kv_indices(
-                    prefill_kv_start_loc_cpu,
+                pcp_metadata = _build_cp_prefill_metadata(
+                    cp_prefill_query_start_loc_cpu,
                     self.dycp_rank,
                     self.dycp_world_size,
-                )
-                pcp_metadata = MLACommonPrefillMetadata.PCPMetadata(
-                    kv_head_indices=kv_head_idx.to(
-                        device, dtype=torch.int32, non_blocking=True
-                    ),
-                    kv_tail_indices=kv_tail_idx.to(
-                        device, dtype=torch.int32, non_blocking=True
-                    ),
-                    query_head_indices=q_head_idx.to(
-                        device, dtype=torch.int32, non_blocking=True
-                    ),
-                    query_tail_indices=q_tail_idx.to(
-                        device, dtype=torch.int32, non_blocking=True
-                    ),
-                    output_restore_idx=output_res_idx.to(
-                        device, dtype=torch.int32, non_blocking=True
-                    ),
                 )
 
             prefill_metadata = self.prefill_metadata_cls(
@@ -1934,167 +1964,25 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         assert self.pcp_world_size is not None
         assert self.pcp_rank is not None
         if self.pcp_world_size > 1:
-            # NOTE When PCP is enabled, we split the queries keys and values into
-            # "head" and "tail" parts using the DualChunkSwap strategy to balance
-            # workload across PCP ranks. We run attention twice (once for the head
-            # part and once for the tail part), then concatenate the results and
-            # restore the original ordering.
-            #
-            # Example pcp_world_size=2 & full sequence: [0,1,2,3]
-            #
-            #   pcp_rank0: Q [0,3] KV [0,1,2,3]
-            #    Q\KV  0 1 2 3
-            # head 0   1 0 0 0
-            #      -----------
-            # tail 3   1 1 1 1
-            #
-            #   pcp_rank1: Q[1,3] KV[0,1,2,3]
-            #    Q\KV  0 1 2 3
-            # head 1   1 1 0 0
-            #      -----------
-            # tail 2   1 1 1 0
-
-            pcp_metadata = prefill.pcp_metadata
-            assert pcp_metadata is not None
-            q_head_indices = _safe_index(
-                pcp_metadata.query_head_indices, q.shape[0], q.device
+            return self._run_dual_chunk_prefill_new_tokens(
+                prefill,
+                q,
+                k,
+                v,
+                return_softmax_lse,
+                self.pcp_rank,
+                self.pcp_world_size,
             )
-            q_tail_indices = _safe_index(
-                pcp_metadata.query_tail_indices, q.shape[0], q.device
-            )
-            kv_head_indices = _safe_index(
-                pcp_metadata.kv_head_indices, k.shape[0], k.device
-            )
-            kv_tail_indices = _safe_index(
-                pcp_metadata.kv_tail_indices, k.shape[0], k.device
-            )
-            output_head, lse_head = self._flash_attn_varlen_diff_headdims(
-                q=torch.index_select(q, 0, q_head_indices),
-                k=torch.index_select(k, 0, kv_head_indices),
-                v=torch.index_select(v, 0, kv_head_indices),
-                cu_seqlens_q=prefill.query_start_loc // 2,
-                cu_seqlens_k=prefill.query_start_loc // 2 * (self.pcp_rank + 1),
-                max_seqlen_q=prefill.max_query_len // 2,
-                max_seqlen_k=prefill.max_query_len // 2 * (self.pcp_rank + 1),
-                softmax_scale=self.scale,
-                causal=True,
-                return_softmax_lse=True,
-            )
-
-            output_tail, lse_tail = self._flash_attn_varlen_diff_headdims(
-                q=torch.index_select(q, 0, q_tail_indices),
-                k=torch.index_select(k, 0, kv_tail_indices),
-                v=torch.index_select(v, 0, kv_tail_indices),
-                cu_seqlens_q=prefill.query_start_loc // 2,
-                cu_seqlens_k=prefill.query_start_loc
-                // 2
-                * (self.pcp_world_size * 2 - self.pcp_rank),
-                max_seqlen_q=prefill.max_query_len // 2,
-                max_seqlen_k=prefill.max_query_len
-                // 2
-                * (self.pcp_world_size * 2 - self.pcp_rank),
-                softmax_scale=self.scale,
-                causal=True,
-                return_softmax_lse=True,
-            )
-
-            output = torch.cat([output_head, output_tail], dim=0)
-            output_restore_idx = _safe_index(
-                pcp_metadata.output_restore_idx, output.shape[0], output.device
-            )
-            if return_softmax_lse:
-                # FA returns LSE in shape [ H, B ]
-                lse = torch.cat([lse_head, lse_tail], dim=-1)
-                lse_restore_idx = _safe_index(
-                    output_restore_idx, lse.shape[-1], lse.device
-                )
-                return (
-                    torch.index_select(output, 0, output_restore_idx),
-                    torch.index_select(lse, -1, lse_restore_idx),
-                )
-            else:
-                return torch.index_select(output, 0, output_restore_idx)
         elif self.dycp_world_size > 1 and prefill.num_dycp_reqs > 0:
-            # NOTE When PCP is enabled, we split the queries keys and values into
-            # "head" and "tail" parts using the DualChunkSwap strategy to balance
-            # workload across PCP ranks. We run attention twice (once for the head
-            # part and once for the tail part), then concatenate the results and
-            # restore the original ordering.
-            #
-            # Example pcp_world_size=2 & full sequence: [0,1,2,3]
-            #
-            #   pcp_rank0: Q [0,3] KV [0,1,2,3]
-            #    Q\KV  0 1 2 3
-            # head 0   1 0 0 0
-            #      -----------
-            # tail 3   1 1 1 1
-            #
-            #   pcp_rank1: Q[1,3] KV[0,1,2,3]
-            #    Q\KV  0 1 2 3
-            # head 1   1 1 0 0
-            #      -----------
-            # tail 2   1 1 1 0
-
-            pcp_metadata = prefill.pcp_metadata
-            assert pcp_metadata is not None
-            q_head_indices = _safe_index(
-                pcp_metadata.query_head_indices, q.shape[0], q.device
+            return self._run_dual_chunk_prefill_new_tokens(
+                prefill,
+                q,
+                k,
+                v,
+                return_softmax_lse,
+                self.dycp_rank,
+                self.dycp_world_size,
             )
-            q_tail_indices = _safe_index(
-                pcp_metadata.query_tail_indices, q.shape[0], q.device
-            )
-            kv_head_indices = _safe_index(
-                pcp_metadata.kv_head_indices, k.shape[0], k.device
-            )
-            kv_tail_indices = _safe_index(
-                pcp_metadata.kv_tail_indices, k.shape[0], k.device
-            )
-            output_head, lse_head = self._flash_attn_varlen_diff_headdims(
-                q=torch.index_select(q, 0, q_head_indices),
-                k=torch.index_select(k, 0, kv_head_indices),
-                v=torch.index_select(v, 0, kv_head_indices),
-                cu_seqlens_q=prefill.query_start_loc // 2,
-                cu_seqlens_k=prefill.query_start_loc // 2 * (self.dycp_rank + 1),
-                max_seqlen_q=prefill.max_query_len // 2,
-                max_seqlen_k=prefill.max_query_len // 2 * (self.dycp_rank + 1),
-                softmax_scale=self.scale,
-                causal=True,
-                return_softmax_lse=True,
-            )
-
-            output_tail, lse_tail = self._flash_attn_varlen_diff_headdims(
-                q=torch.index_select(q, 0, q_tail_indices),
-                k=torch.index_select(k, 0, kv_tail_indices),
-                v=torch.index_select(v, 0, kv_tail_indices),
-                cu_seqlens_q=prefill.query_start_loc // 2,
-                cu_seqlens_k=prefill.query_start_loc
-                // 2
-                * (self.dycp_world_size * 2 - self.dycp_rank),
-                max_seqlen_q=prefill.max_query_len // 2,
-                max_seqlen_k=prefill.max_query_len
-                // 2
-                * (self.dycp_world_size * 2 - self.dycp_rank),
-                softmax_scale=self.scale,
-                causal=True,
-                return_softmax_lse=True,
-            )
-
-            output = torch.cat([output_head, output_tail], dim=0)
-            output_restore_idx = _safe_index(
-                pcp_metadata.output_restore_idx, output.shape[0], output.device
-            )
-            if return_softmax_lse:
-                # FA returns LSE in shape [ H, B ]
-                lse = torch.cat([lse_head, lse_tail], dim=-1)
-                lse_restore_idx = _safe_index(
-                    output_restore_idx, lse.shape[-1], lse.device
-                )
-                return (
-                    torch.index_select(output, 0, output_restore_idx),
-                    torch.index_select(lse, -1, lse_restore_idx),
-                )
-            else:
-                return torch.index_select(output, 0, output_restore_idx)
         else:
             return self._flash_attn_varlen_diff_headdims(
                 q=q,
@@ -2153,6 +2041,141 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         if return_softmax_lse:
             return output, lse
         return output
+
+    def _run_dual_chunk_prefill_new_tokens(
+        self,
+        prefill: MLACommonPrefillMetadata,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        return_softmax_lse: bool,
+        cp_rank: int,
+        cp_world_size: int,
+    ):
+        pcp_metadata = prefill.pcp_metadata
+        assert pcp_metadata is not None
+
+        outputs: list[torch.Tensor] = []
+        lses: list[torch.Tensor] = []
+
+        num_unsplit_reqs = pcp_metadata.num_unsplit_reqs
+        if num_unsplit_reqs > 0:
+            unsplit_query_start_loc = prefill.query_start_loc[: num_unsplit_reqs + 1]
+            unsplit_num_tokens = int(unsplit_query_start_loc[-1].item())
+            unsplit_max_query_len = int(
+                (
+                    unsplit_query_start_loc[1:]
+                    - unsplit_query_start_loc[:-1]
+                ).max().item()
+            )
+            unsplit_ret = self._flash_attn_varlen_diff_headdims(
+                q=q[:unsplit_num_tokens],
+                k=k[:unsplit_num_tokens],
+                v=v[:unsplit_num_tokens],
+                cu_seqlens_q=unsplit_query_start_loc,
+                cu_seqlens_k=unsplit_query_start_loc,
+                max_seqlen_q=unsplit_max_query_len,
+                max_seqlen_k=unsplit_max_query_len,
+                softmax_scale=self.scale,
+                causal=True,
+                return_softmax_lse=return_softmax_lse,
+            )
+            if return_softmax_lse:
+                outputs.append(unsplit_ret[0])
+                lses.append(unsplit_ret[1])
+            else:
+                outputs.append(unsplit_ret)
+
+        split_query_start_loc = (
+            prefill.query_start_loc[num_unsplit_reqs:]
+            - prefill.query_start_loc[num_unsplit_reqs]
+        )
+        has_split_reqs = (
+            split_query_start_loc.numel() > 1
+            and int(split_query_start_loc[-1].item()) > 0
+        )
+        if has_split_reqs:
+            q_head_indices = _safe_index(
+                pcp_metadata.query_head_indices, q.shape[0], q.device
+            )
+            q_tail_indices = _safe_index(
+                pcp_metadata.query_tail_indices, q.shape[0], q.device
+            )
+            kv_head_indices = _safe_index(
+                pcp_metadata.kv_head_indices, k.shape[0], k.device
+            )
+            kv_tail_indices = _safe_index(
+                pcp_metadata.kv_tail_indices, k.shape[0], k.device
+            )
+            split_max_query_len = int(
+                (
+                    split_query_start_loc[1:]
+                    - split_query_start_loc[:-1]
+                ).max().item()
+            )
+            output_head, lse_head = self._flash_attn_varlen_diff_headdims(
+                q=torch.index_select(q, 0, q_head_indices),
+                k=torch.index_select(k, 0, kv_head_indices),
+                v=torch.index_select(v, 0, kv_head_indices),
+                cu_seqlens_q=split_query_start_loc // 2,
+                cu_seqlens_k=split_query_start_loc // 2 * (cp_rank + 1),
+                max_seqlen_q=split_max_query_len // 2,
+                max_seqlen_k=split_max_query_len // 2 * (cp_rank + 1),
+                softmax_scale=self.scale,
+                causal=True,
+                return_softmax_lse=True,
+            )
+
+            output_tail, lse_tail = self._flash_attn_varlen_diff_headdims(
+                q=torch.index_select(q, 0, q_tail_indices),
+                k=torch.index_select(k, 0, kv_tail_indices),
+                v=torch.index_select(v, 0, kv_tail_indices),
+                cu_seqlens_q=split_query_start_loc // 2,
+                cu_seqlens_k=split_query_start_loc
+                // 2
+                * (cp_world_size * 2 - cp_rank),
+                max_seqlen_q=split_max_query_len // 2,
+                max_seqlen_k=split_max_query_len
+                // 2
+                * (cp_world_size * 2 - cp_rank),
+                softmax_scale=self.scale,
+                causal=True,
+                return_softmax_lse=True,
+            )
+
+            split_output = torch.cat([output_head, output_tail], dim=0)
+            output_restore_idx = _safe_index(
+                pcp_metadata.output_restore_idx,
+                split_output.shape[0],
+                split_output.device,
+            )
+            split_output = torch.index_select(split_output, 0, output_restore_idx)
+
+            if return_softmax_lse:
+                split_lse = torch.cat([lse_head, lse_tail], dim=-1)
+                lse_restore_idx = _safe_index(
+                    output_restore_idx, split_lse.shape[-1], split_lse.device
+                )
+                split_lse = torch.index_select(split_lse, -1, lse_restore_idx)
+                lses.append(split_lse)
+
+            outputs.append(split_output)
+
+        if not outputs:
+            empty_output = q.new_empty((0, q.shape[1], v.shape[-1]))
+            if return_softmax_lse:
+                empty_lse = q.new_empty((q.shape[1], 0))
+                return empty_output, empty_lse
+            return empty_output
+
+        if return_softmax_lse:
+            merged_output = (
+                outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=0)
+            )
+            merged_lse = lses[0] if len(lses) == 1 else torch.cat(lses, dim=-1)
+            return merged_output, merged_lse
+
+        return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=0)
 
     def _run_prefill_context_chunk_fa(
         self, prefill: MLACommonPrefillMetadata, chunk_idx: int, q, k, v
