@@ -1968,6 +1968,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             indices = indices.to(device=device, dtype=torch.int64, non_blocking=True)
         return torch.clamp(indices, 0, upper_bound - 1).contiguous()
 
+    def _chenxiao_debug(self, message: str, *args) -> None:
+        logger.info("chenxiao--debug " + message, *args)
+
     def _split_mixed_dycp_prefill_attn_metadata(
         self,
         attn_metadata: MLACommonMetadata,
@@ -2030,6 +2033,17 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             decode_dycp_tokens = int(
                 attn_metadata.query_start_loc[decode_dycp_reqs].item()
             )
+        self._chenxiao_debug(
+            "mixed_dycp_allgather enter local_kv=%d local_pe=%d dycp_prefill_tokens=%d "
+            "total_dycp_tokens=%d decode_dycp_reqs=%d decode_dycp_tokens=%d world=%d",
+            int(kv_c_normed.shape[0]),
+            int(k_pe.shape[0]),
+            int(dycp_prefill_tokens),
+            total_dycp_tokens,
+            int(decode_dycp_reqs),
+            decode_dycp_tokens,
+            int(self.dycp_world_size),
+        )
         restore_idx = attn_metadata.pcp_allgather_restore_idx[
             : total_dycp_tokens * self.dycp_world_size
         ]
@@ -2049,6 +2063,10 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 rounding_mode="floor",
             )
             restore_idx = rank_offsets * dycp_prefill_tokens + token_offsets
+        self._chenxiao_debug(
+            "mixed_dycp_allgather before_restore restore_len=%d",
+            int(restore_idx.numel()),
+        )
 
         return pcp_kv_allgather_and_restore(
             kv_c_normed,
@@ -2070,6 +2088,19 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
     ):
         assert self.pcp_world_size is not None
         assert self.pcp_rank is not None
+        self._chenxiao_debug(
+            "prefill_fa enter q=%d k=%d v=%d return_lse=%s pcp_world=%d dycp_world=%d "
+            "prefill_num_dycp_reqs=%d has_pcp_meta=%s local_k=%s",
+            int(q.shape[0]),
+            int(k.shape[0]),
+            int(v.shape[0]),
+            str(return_softmax_lse),
+            int(self.pcp_world_size),
+            int(self.dycp_world_size),
+            int(prefill.num_dycp_reqs),
+            str(prefill.pcp_metadata is not None),
+            str(local_k is not None),
+        )
         if self.pcp_world_size > 1:
             return self._run_dual_chunk_prefill_new_tokens(
                 prefill,
@@ -2184,6 +2215,18 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
         outputs: list[torch.Tensor] = []
         lses: list[torch.Tensor] = []
+        self._chenxiao_debug(
+            "dual_chunk enter cp_rank=%d cp_world=%d q=%d k=%d v=%d num_unsplit_reqs=%d "
+            "prefill_num_dycp_reqs=%d local_k=%s",
+            int(cp_rank),
+            int(cp_world_size),
+            int(q.shape[0]),
+            int(k.shape[0]),
+            int(v.shape[0]),
+            int(pcp_metadata.num_unsplit_reqs),
+            int(prefill.num_dycp_reqs),
+            str(local_k is not None),
+        )
 
         num_unsplit_reqs = pcp_metadata.num_unsplit_reqs
         if num_unsplit_reqs > 0:
@@ -2197,6 +2240,13 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             )
             unsplit_k = k if local_k is None else local_k
             unsplit_v = v if local_v is None else local_v
+            self._chenxiao_debug(
+                "dual_chunk unsplit before_flash tokens=%d max_q=%d unsplit_k=%d unsplit_v=%d",
+                unsplit_num_tokens,
+                unsplit_max_query_len,
+                int(unsplit_k.shape[0]),
+                int(unsplit_v.shape[0]),
+            )
             unsplit_ret = self._flash_attn_varlen_diff_headdims(
                 q=q[:unsplit_num_tokens],
                 k=unsplit_k[:unsplit_num_tokens],
@@ -2208,6 +2258,11 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 softmax_scale=self.scale,
                 causal=True,
                 return_softmax_lse=return_softmax_lse,
+            )
+            self._chenxiao_debug(
+                "dual_chunk unsplit after_flash tokens=%d return_lse=%s",
+                unsplit_num_tokens,
+                str(return_softmax_lse),
             )
             if return_softmax_lse:
                 outputs.append(unsplit_ret[0])
@@ -2222,6 +2277,12 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         has_split_reqs = (
             split_query_start_loc.numel() > 1
             and int(split_query_start_loc[-1].item()) > 0
+        )
+        self._chenxiao_debug(
+            "dual_chunk split_meta has_split=%s split_qsl_numel=%d split_total_tokens=%d",
+            str(has_split_reqs),
+            int(split_query_start_loc.numel()),
+            int(split_query_start_loc[-1].item()) if split_query_start_loc.numel() > 0 else 0,
         )
         if has_split_reqs:
             q_head_indices = self._safe_index(
@@ -2242,6 +2303,19 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     - split_query_start_loc[:-1]
                 ).max().item()
             )
+            self._chenxiao_debug(
+                "dual_chunk split_indices q_head=%d q_tail=%d kv_head=%d kv_tail=%d max_q=%d",
+                int(q_head_indices.numel()),
+                int(q_tail_indices.numel()),
+                int(kv_head_indices.numel()),
+                int(kv_tail_indices.numel()),
+                split_max_query_len,
+            )
+            self._chenxiao_debug(
+                "dual_chunk before_head_flash q=%d k=%d",
+                int(q_head_indices.numel()),
+                int(kv_head_indices.numel()),
+            )
             output_head, lse_head = self._flash_attn_varlen_diff_headdims(
                 q=torch.index_select(q, 0, q_head_indices),
                 k=torch.index_select(k, 0, kv_head_indices),
@@ -2254,7 +2328,16 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 causal=True,
                 return_softmax_lse=True,
             )
+            self._chenxiao_debug(
+                "dual_chunk after_head_flash out=%d",
+                int(output_head.shape[0]),
+            )
 
+            self._chenxiao_debug(
+                "dual_chunk before_tail_flash q=%d k=%d",
+                int(q_tail_indices.numel()),
+                int(kv_tail_indices.numel()),
+            )
             output_tail, lse_tail = self._flash_attn_varlen_diff_headdims(
                 q=torch.index_select(q, 0, q_tail_indices),
                 k=torch.index_select(k, 0, kv_tail_indices),
@@ -2271,6 +2354,10 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 causal=True,
                 return_softmax_lse=True,
             )
+            self._chenxiao_debug(
+                "dual_chunk after_tail_flash out=%d",
+                int(output_tail.shape[0]),
+            )
 
             split_output = torch.cat([output_head, output_tail], dim=0)
             output_restore_idx = self._safe_index(
@@ -2279,6 +2366,11 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 split_output.device,
             )
             split_output = torch.index_select(split_output, 0, output_restore_idx)
+            self._chenxiao_debug(
+                "dual_chunk after_restore split_output=%d restore_idx=%d",
+                int(split_output.shape[0]),
+                int(output_restore_idx.numel()),
+            )
 
             if return_softmax_lse:
                 split_lse = torch.cat([lse_head, lse_tail], dim=-1)
@@ -2297,6 +2389,11 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 return empty_output, empty_lse
             return empty_output
 
+        self._chenxiao_debug(
+            "dual_chunk before_return outputs=%d return_lse=%s",
+            len(outputs),
+            str(return_softmax_lse),
+        )
         if return_softmax_lse:
             merged_output = (
                 outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=0)
@@ -2769,6 +2866,19 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         assert attn_metadata.prefill is not None
         assert self.dcp_world_size is not None
         assert self.pcp_world_size is not None
+        self._chenxiao_debug(
+            "_forward_prefill enter q=%d kv=%d k_pe=%d out=%d num_decodes=%d "
+            "num_prefills=%d num_decode_tokens=%d prefill_num_dycp_reqs=%d has_context=%s",
+            int(q.shape[0]),
+            int(kv_c_normed.shape[0]),
+            int(k_pe.shape[0]),
+            int(output.shape[0]),
+            int(attn_metadata.num_decodes),
+            int(attn_metadata.num_prefills),
+            int(attn_metadata.num_decode_tokens),
+            int(attn_metadata.prefill.num_dycp_reqs),
+            str(attn_metadata.prefill.chunked_context is not None),
+        )
 
         has_mixed_dycp_prefill = (
             self.dycp_world_size > 1
@@ -2781,6 +2891,13 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             )
             dycp_num_tokens = (
                 0 if dycp_attn_metadata is None else dycp_attn_metadata.num_actual_tokens
+            )
+            self._chenxiao_debug(
+                "_forward_prefill mixed_split dycp_tokens=%d dp_tokens=%d dycp_reqs=%d dp_reqs=%d",
+                int(dycp_num_tokens),
+                0 if dp_attn_metadata is None else int(dp_attn_metadata.num_actual_tokens),
+                0 if dycp_attn_metadata is None else int(dycp_attn_metadata.num_reqs),
+                0 if dp_attn_metadata is None else int(dp_attn_metadata.num_reqs),
             )
 
             if dycp_attn_metadata is not None and dycp_num_tokens > 0:
@@ -2851,6 +2968,10 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             return_softmax_lse=has_context,
             local_k=local_k,
             local_v=local_v,
+        )
+        self._chenxiao_debug(
+            "_forward_prefill after_new_tokens has_context=%s",
+            str(has_context),
         )
 
         if has_context:
