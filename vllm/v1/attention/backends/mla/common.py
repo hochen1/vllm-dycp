@@ -993,6 +993,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             )
 
         supports_spec_decode = self.query_len_support != QueryLenSupport.SINGLE_ONLY
+        if self.dycp_world_size > 1:
+            # DyCP prefill currently assumes CP requests stay in the prefill
+            # path. Keep decode classification to strict single-token only.
+            self.reorder_batch_threshold = 1
         self._init_reorder_batch_threshold(
             self.reorder_batch_threshold, supports_spec_decode, supports_cp_with_varlen
         )
