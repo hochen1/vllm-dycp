@@ -560,7 +560,8 @@ def split_metadata(
                     else None
                 ),
                 local_context_lens_allranks=(
-                    [s[:n_dycp] for s in cc.local_context_lens_allranks]
+                    # Shape is [num_prefills, cp_world_size], so slice request dim.
+                    cc.local_context_lens_allranks[:n_dycp]
                     if cc.local_context_lens_allranks is not None
                     else None
                 ),
@@ -700,7 +701,8 @@ def split_metadata(
                     else None
                 ),
                 local_context_lens_allranks=(
-                    [s[n_dycp:] for s in cc.local_context_lens_allranks]
+                    # Shape is [num_prefills, cp_world_size], so slice request dim.
+                    cc.local_context_lens_allranks[n_dycp:]
                     if cc.local_context_lens_allranks is not None
                     else None
                 ),
