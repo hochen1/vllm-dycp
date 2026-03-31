@@ -14,6 +14,11 @@ def merge_attn_states(
     suffix_lse: torch.Tensor,
     output_lse: torch.Tensor | None = None,
 ) -> None:
+    # Some dynamic batching paths can produce empty local query shards on
+    # a subset of ranks. Merging empty attention outputs is a no-op.
+    if output.numel() == 0:
+        return
+
     # NOTE(DefTruth): Currently, custom merge_attn_states CUDA kernel
     # is not support for FP8 dtype, fallback to use Triton kernel.
     def supported_dtypes(o: torch.Tensor) -> bool:

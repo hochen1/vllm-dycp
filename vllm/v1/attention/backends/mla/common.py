@@ -2659,6 +2659,21 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 suffix_output = suffix_output[..., : v.shape[-1]]
 
             output = output.view(-1, self.num_heads, self.v_head_dim)
+            num_prefill_tokens = int(output.shape[0])
+            # Avoid calling custom merge kernel on empty tensors. Some ranks can
+            # legitimately have zero local query tokens under DyCP split.
+            if num_prefill_tokens == 0:
+                return
+            if (
+                int(context_output.shape[0]) != num_prefill_tokens
+                or int(suffix_output.shape[0]) != num_prefill_tokens
+            ):
+                raise RuntimeError(
+                    "merge_attn_states shape mismatch in prefill: "
+                    f"output={tuple(output.shape)}, "
+                    f"context={tuple(context_output.shape)}, "
+                    f"suffix={tuple(suffix_output.shape)}"
+                )
             merge_attn_states(
                 output=output,
                 prefix_output=context_output,
