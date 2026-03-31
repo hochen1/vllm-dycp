@@ -1640,6 +1640,16 @@ def reorg_kvcache(
                 cur_seq_len += local_chunk_len
         max_seq_len_check = max(max_seq_len_check, cur_seq_len)
         src_token_idx += padded_local_chunk_seq_len
+    if not kv_c_segments:
+        if sum_seq_len == 0:
+            empty_kv_c = allgatered_kv_c_normed.new_empty(
+                (0, *allgatered_kv_c_normed.shape[1:])
+            )
+            empty_k_pe = allgatered_k_pe.new_empty((0, *allgatered_k_pe.shape[1:]))
+            return empty_kv_c, empty_k_pe
+        raise RuntimeError(
+            "reorg_kvcache found no KV segments for a non-empty context chunk."
+        )
     reorganized_kv_c_normed = torch.cat(kv_c_segments, dim=0)
     reorganized_k_pe = torch.cat(k_pe_segments, dim=0)
     assert reorganized_kv_c_normed.shape[0] == sum_seq_len
@@ -2447,6 +2457,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         workspace = prefill_metadata.chunked_context.workspace
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
+            if toks == 0 or prefill_metadata.chunked_context.max_seq_lens[i] == 0:
+                continue
             ops.gather_and_maybe_dequant_cache(
                 src_cache=kv_c_and_k_pe_cache,
                 dst=workspace,
@@ -2520,6 +2532,10 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
+            chunk_sum_seq_len = int(prefill_metadata.chunked_context.cu_seq_lens_lst[i][-1])
+            chunk_max_seq_len = int(prefill_metadata.chunked_context.max_seq_lens[i])
+            if toks == 0 or chunk_sum_seq_len == 0 or chunk_max_seq_len == 0:
+                continue
             ops.cp_gather_cache(
                 src_cache=kv_c_and_k_pe_cache,
                 dst=workspace,
@@ -2567,8 +2583,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     i
                 ],
                 local_context_lens_allranks=prefill_metadata.chunked_context.local_context_lens_allranks,
-                sum_seq_len=prefill_metadata.chunked_context.cu_seq_lens_lst[i][-1],
-                max_seq_len=prefill_metadata.chunked_context.max_seq_lens[i],
+                sum_seq_len=chunk_sum_seq_len,
+                max_seq_len=chunk_max_seq_len,
                 chunk_size=prefill_metadata.chunked_context.chunk_size,
                 chunk_idx=i,
                 toks=toks,
