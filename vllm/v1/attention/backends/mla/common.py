@@ -453,6 +453,113 @@ M = TypeVar("M", bound=MLACommonMetadata)
 A = TypeVar("A")
 
 
+def _get_cumsum_and_arange_cpu(
+    lengths: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    lengths = lengths.to(device="cpu", dtype=torch.int64)
+    if lengths.numel() == 0:
+        empty = torch.empty((0,), dtype=torch.int64)
+        return empty, empty
+
+    cu_lengths = torch.cumsum(lengths, dim=0)
+    total_num_tokens = int(cu_lengths[-1].item())
+    if total_num_tokens == 0:
+        return cu_lengths, torch.empty((0,), dtype=torch.int64)
+
+    cumsums_offsets = torch.repeat_interleave(cu_lengths - lengths, lengths)
+    arange = torch.arange(total_num_tokens, dtype=torch.int64) - cumsums_offsets
+    return cu_lengths, arange
+
+
+def _build_prefill_pcp_allgather_restore_idx(
+    query_start_loc: torch.Tensor,
+    cp_world_size: int,
+    num_unsplit_reqs: int = 0,
+) -> torch.Tensor | None:
+    if cp_world_size <= 1 or query_start_loc.numel() <= 1:
+        return None
+
+    query_start_loc_cpu = query_start_loc.detach().to(device="cpu", dtype=torch.int64)
+    local_num_scheduled_tokens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+    if (
+        local_num_scheduled_tokens.numel() == 0
+        or int(local_num_scheduled_tokens.sum().item()) == 0
+    ):
+        return None
+
+    num_reqs = int(local_num_scheduled_tokens.numel())
+    num_unsplit_reqs = max(0, min(num_unsplit_reqs, num_reqs))
+    num_scheduled_tokens = local_num_scheduled_tokens.clone()
+    if num_unsplit_reqs < num_reqs:
+        num_scheduled_tokens[num_unsplit_reqs:] *= cp_world_size
+
+    num_decode_tokens = (
+        int(num_scheduled_tokens[:num_unsplit_reqs].sum().item())
+        if num_unsplit_reqs > 0
+        else 0
+    )
+    alignment = 2 * cp_world_size
+    num_padded_scheduled_tokens = (
+        (num_scheduled_tokens + alignment - 1) // alignment
+    ) * alignment
+    if num_unsplit_reqs > 0:
+        num_padded_scheduled_tokens[:num_unsplit_reqs] = (
+            num_scheduled_tokens[:num_unsplit_reqs] * cp_world_size
+        )
+    cu_padded_tokens, _ = _get_cumsum_and_arange_cpu(num_padded_scheduled_tokens)
+
+    pcp_tokens = num_padded_scheduled_tokens // cp_world_size
+    pcp_chunk_sizes = torch.clamp(pcp_tokens // 2, min=1)
+    if num_unsplit_reqs > 0:
+        pcp_chunk_sizes[:num_unsplit_reqs] = pcp_tokens[:num_unsplit_reqs]
+    total_pcp_tokens = int(pcp_tokens.sum().item())
+    if total_pcp_tokens == 0:
+        return None
+
+    _, pcp_arange = _get_cumsum_and_arange_cpu(pcp_tokens)
+    _, pcp_chunk_arange = _get_cumsum_and_arange_cpu(pcp_chunk_sizes)
+    repeated_chunk_sizes = torch.repeat_interleave(pcp_chunk_sizes, pcp_tokens)
+    pcp_head_chunk_mask = pcp_arange < repeated_chunk_sizes
+
+    padded_pos_start_loc = torch.roll(cu_padded_tokens, 1)
+    padded_pos_start_loc[0] = 0
+
+    def _get_current_rank_positions(
+        positions_start_loc: torch.Tensor, rank_i: int
+    ) -> torch.Tensor:
+        positions = torch.empty((total_pcp_tokens,), dtype=torch.int64)
+        head_start_loc = positions_start_loc + rank_i * pcp_chunk_sizes
+        tail_start_loc = (
+            positions_start_loc
+            + (2 * cp_world_size - rank_i - 1) * pcp_chunk_sizes
+        )
+        positions[pcp_head_chunk_mask] = pcp_chunk_arange + torch.repeat_interleave(
+            head_start_loc, pcp_chunk_sizes
+        )
+        if num_decode_tokens < total_pcp_tokens:
+            positions[~pcp_head_chunk_mask] = pcp_chunk_arange[
+                num_decode_tokens:
+            ] + torch.repeat_interleave(tail_start_loc, pcp_chunk_sizes)[
+                num_decode_tokens:
+            ]
+        if num_unsplit_reqs > 0:
+            _, decode_positions = _get_cumsum_and_arange_cpu(
+                num_scheduled_tokens[:num_unsplit_reqs]
+            )
+            positions[:num_decode_tokens] = decode_positions
+        return positions
+
+    all_positions_lst = [
+        _get_current_rank_positions(padded_pos_start_loc, rank_i)
+        for rank_i in range(cp_world_size)
+    ]
+
+    restore_idx = torch.argsort(torch.cat(all_positions_lst, dim=0))
+    return restore_idx.to(
+        device=query_start_loc.device, dtype=torch.int64, non_blocking=True
+    )
+
+
 def split_metadata(
     attn_metadata: MLACommonMetadata,
 ) -> tuple[MLACommonMetadata | None, MLACommonMetadata | None]:
@@ -600,6 +707,23 @@ def split_metadata(
     ).max().item()
     dycp_max_seq_len = attn_metadata.max_seq_len  # conservative upper bound
 
+    dycp_cp_world_size = None
+    dycp_pcp_allgather_restore_idx = None
+    if attn_metadata.pcp_allgather_restore_idx is not None and dycp_num_actual_tokens > 0:
+        restore_len = int(attn_metadata.pcp_allgather_restore_idx.shape[0])
+        if restore_len > 0 and restore_len % int(dycp_num_actual_tokens) == 0:
+            dycp_cp_world_size = restore_len // int(dycp_num_actual_tokens)
+            dycp_num_unsplit_reqs = (
+                0
+                if dycp_prefill is None or dycp_prefill.pcp_metadata is None
+                else int(dycp_prefill.pcp_metadata.num_unsplit_reqs)
+            )
+            dycp_pcp_allgather_restore_idx = _build_prefill_pcp_allgather_restore_idx(
+                dycp_query_start_loc,
+                dycp_cp_world_size,
+                dycp_num_unsplit_reqs,
+            )
+
     dycp_attn_metadata = type(attn_metadata)(
         num_reqs=n_dycp,
         max_query_len=dycp_max_query_len,
@@ -613,7 +737,7 @@ def split_metadata(
         num_prefills=n_dycp,
         prefill=dycp_prefill,
         decode=None,
-        pcp_allgather_restore_idx=attn_metadata.pcp_allgather_restore_idx,
+        pcp_allgather_restore_idx=dycp_pcp_allgather_restore_idx,
         num_dycp_reqs=n_dycp,
         num_dycp_tokens=dycp_num_actual_tokens,
     )
@@ -751,7 +875,7 @@ def split_metadata(
         num_prefills=n_dp,
         prefill=dp_prefill,
         decode=None,
-        pcp_allgather_restore_idx=attn_metadata.pcp_allgather_restore_idx,
+        pcp_allgather_restore_idx=None,
         num_dycp_reqs=0,
     )
 
@@ -2011,68 +2135,60 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             num_dycp_reqs=prefill_num_dycp_reqs,
             num_dycp_tokens=prefill_num_dycp_tokens,
         )
-        return split_metadata(prefill_attn_metadata)
+        dycp_attn_metadata, dp_attn_metadata = split_metadata(prefill_attn_metadata)
+        if (
+            dycp_attn_metadata is not None
+            and dycp_attn_metadata.pcp_allgather_restore_idx is None
+            and self.dycp_world_size is not None
+            and self.dycp_world_size > 1
+        ):
+            dycp_attn_metadata.pcp_allgather_restore_idx = (
+                _build_prefill_pcp_allgather_restore_idx(
+                    dycp_attn_metadata.query_start_loc,
+                    self.dycp_world_size,
+                    (
+                        0
+                        if dycp_attn_metadata.prefill is None
+                        or dycp_attn_metadata.prefill.pcp_metadata is None
+                        else int(dycp_attn_metadata.prefill.pcp_metadata.num_unsplit_reqs)
+                    ),
+                )
+            )
+        if dp_attn_metadata is not None:
+            dp_attn_metadata.pcp_allgather_restore_idx = None
+        return dycp_attn_metadata, dp_attn_metadata
 
     def _allgather_mixed_dycp_prefill_kv(
         self,
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
-        attn_metadata: MLACommonMetadata,
+        dycp_attn_metadata: MLACommonMetadata,
         dycp_prefill_tokens: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if dycp_prefill_tokens <= 0:
             return kv_c_normed[:0], k_pe[:0]
 
         assert self.dycp_world_size is not None
-        assert attn_metadata.pcp_allgather_restore_idx is not None
-
-        decode_dycp_reqs = min(attn_metadata.num_dycp_reqs, attn_metadata.num_decodes)
-        decode_dycp_tokens = 0
-        total_dycp_tokens = int(attn_metadata.num_dycp_tokens)
-        if decode_dycp_reqs > 0:
-            decode_dycp_tokens = int(
-                attn_metadata.query_start_loc[decode_dycp_reqs].item()
-            )
+        assert dycp_attn_metadata.pcp_allgather_restore_idx is not None
         self._chenxiao_debug(
             "mixed_dycp_allgather enter local_kv=%d local_pe=%d dycp_prefill_tokens=%d "
-            "total_dycp_tokens=%d decode_dycp_reqs=%d decode_dycp_tokens=%d world=%d",
+            "restore_len=%d world=%d",
             int(kv_c_normed.shape[0]),
             int(k_pe.shape[0]),
             int(dycp_prefill_tokens),
-            total_dycp_tokens,
-            int(decode_dycp_reqs),
-            decode_dycp_tokens,
+            int(dycp_attn_metadata.pcp_allgather_restore_idx.shape[0]),
             int(self.dycp_world_size),
         )
-        restore_idx = attn_metadata.pcp_allgather_restore_idx[
-            : total_dycp_tokens * self.dycp_world_size
-        ]
-        if decode_dycp_tokens > 0 and restore_idx.numel() > 0:
-            restore_idx = restore_idx.to(
-                device=kv_c_normed.device,
-                dtype=torch.int64,
-                non_blocking=True,
-            )
-            token_offsets = torch.remainder(restore_idx, total_dycp_tokens)
-            keep_mask = token_offsets >= decode_dycp_tokens
-            restore_idx = restore_idx[keep_mask]
-            token_offsets = token_offsets[keep_mask] - decode_dycp_tokens
-            rank_offsets = torch.div(
-                restore_idx,
-                total_dycp_tokens,
-                rounding_mode="floor",
-            )
-            restore_idx = rank_offsets * dycp_prefill_tokens + token_offsets
         self._chenxiao_debug(
             "mixed_dycp_allgather before_restore restore_len=%d",
-            int(restore_idx.numel()),
+            int(dycp_attn_metadata.pcp_allgather_restore_idx.numel()),
         )
 
         return pcp_kv_allgather_and_restore(
             kv_c_normed,
             k_pe,
             dycp_prefill_tokens,
-            restore_idx,
+            dycp_attn_metadata.pcp_allgather_restore_idx,
             get_dycp_group(),
         )
 
@@ -2910,7 +3026,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                         self._allgather_mixed_dycp_prefill_kv(
                             dycp_kv_c_normed,
                             dycp_k_pe,
-                            attn_metadata,
+                            dycp_attn_metadata,
                             dycp_num_tokens,
                         )
                     )
