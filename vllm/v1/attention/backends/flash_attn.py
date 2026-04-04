@@ -44,7 +44,7 @@ from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
-    get_dcp_local_seq_lens,
+    get_cp_local_seq_lens,
     get_kv_cache_layout,
     split_decodes_and_prefills,
 )
@@ -426,7 +426,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             query_kv_lens = query_start_loc[1:] - query_start_loc[:-1]
             dcp_context_kv_lens = seq_lens - query_kv_lens
 
-            dcp_context_kv_lens = get_dcp_local_seq_lens(
+            dcp_context_kv_lens = get_cp_local_seq_lens(
                 dcp_context_kv_lens,
                 self.dcp_world_size,
                 self.dcp_rank,
@@ -451,7 +451,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             )
         elif self.dycp_world_size > 1:
             num_dycp_reqs = common_attn_metadata.num_dycp_reqs
-            seq_lens[:num_dycp_reqs] = get_dcp_local_seq_lens(
+            seq_lens[:num_dycp_reqs] = get_cp_local_seq_lens(
                 seq_lens[:num_dycp_reqs],
                 self.dycp_world_size,
                 self.dycp_rank,
