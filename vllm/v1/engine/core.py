@@ -1166,6 +1166,11 @@ class EngineCoreProc(EngineCore):
             )
         elif request_type == EngineCoreRequestType.EXECUTOR_FAILED:
             raise RuntimeError("Executor failed.")
+        elif request_type == EngineCoreRequestType.START_DP_WAVE:
+            # Non-DP cores may still receive this control message through shared
+            # paths; treat it as a no-op here. DP-specific behavior is handled
+            # in DPEngineCoreProc._handle_client_request.
+            return
         else:
             logger.error(
                 "Unrecognized input request type encountered: %s", request_type
