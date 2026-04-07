@@ -1103,15 +1103,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         # split from local query lengths can diverge across ranks and deadlock
         # DyCP collectives. Force a uniform prefill-style metadata split.
         if self.dycp_world_size > 1 and num_dycp_reqs > 0:
-            logger.info(
-                "chenxiao--debug force_prefill_for_dycp_batch "
-                "orig_num_decodes=%d orig_num_prefills=%d num_dycp_reqs=%d "
-                "num_tokens=%d",
-                int(num_decodes),
-                int(num_prefills),
-                int(num_dycp_reqs),
-                int(num_tokens),
-            )
             num_decodes = 0
             num_decode_tokens = 0
             num_prefills = num_reqs
@@ -1593,25 +1584,10 @@ def reorg_kvcache(
         src_token_idx += padded_local_chunk_seq_len
     if len(kv_c_segments) == 0:
         if sum_seq_len == 0:
-            logger.info(
-                "chenxiao--debug reorg_kvcache empty_segments_zero_sum "
-                "chunk_idx=%d toks=%d max_seq_len=%d",
-                int(chunk_idx),
-                int(toks),
-                int(max_seq_len),
-            )
             return allgatered_kv_c_normed[:0], allgatered_k_pe[:0]
 
         # Best-effort fallback for metadata mismatch in tiny batches.
         fallback_tokens = min(int(sum_seq_len), int(allgatered_kv_c_normed.shape[0]))
-        logger.info(
-            "chenxiao--debug reorg_kvcache empty_segments_fallback "
-            "chunk_idx=%d sum_seq_len=%d gathered_tokens=%d fallback_tokens=%d",
-            int(chunk_idx),
-            int(sum_seq_len),
-            int(allgatered_kv_c_normed.shape[0]),
-            int(fallback_tokens),
-        )
         if fallback_tokens == 0:
             raise ValueError(
                 "reorg_kvcache got empty segments with non-zero sum_seq_len, "
@@ -2495,11 +2471,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
             if toks == 0:
-                logger.info(
-                    "chenxiao--debug prefill_context skip_zero_chunk "
-                    "chunk_idx=%d",
-                    int(i),
-                )
                 continue
             ops.gather_and_maybe_dequant_cache(
                 src_cache=kv_c_and_k_pe_cache,
@@ -2549,11 +2520,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 output_lse = output_lse_tmp
 
         if output is None:
-            logger.info(
-                "chenxiao--debug prefill_context all_chunks_empty "
-                "q_tokens=%d",
-                int(q.shape[0]),
-            )
             output = torch.zeros(
                 q.shape[0],
                 self.num_heads,
@@ -2590,33 +2556,11 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         output = None
         iters = len(prefill_metadata.chunked_context.seq_tot)
         workspace = prefill_metadata.chunked_context.workspace
-        logger.info(
-            "chenxiao--debug cp_prefill_context start "
-            "iters=%d cp_world=%d num_prefills=%d num_dycp_reqs=%d",
-            int(iters),
-            int(cp_world_size),
-            int(attn_metadata.num_prefills),
-            int(attn_metadata.num_dycp_reqs),
-        )
 
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
             sum_seq_len = prefill_metadata.chunked_context.cu_seq_lens_lst[i][-1]
-            logger.info(
-                "chenxiao--debug cp_prefill_context iter "
-                "chunk_idx=%d toks=%d sum_seq_len=%d max_seq_len=%d",
-                int(i),
-                int(toks),
-                int(sum_seq_len),
-                int(prefill_metadata.chunked_context.max_seq_lens[i]),
-            )
             if sum_seq_len == 0:
-                logger.info(
-                    "chenxiao--debug cp_prefill_context skip_zero_chunk "
-                    "chunk_idx=%d toks=%d",
-                    int(i),
-                    int(toks),
-                )
                 continue
             ops.cp_gather_cache(
                 src_cache=kv_c_and_k_pe_cache,
@@ -2640,13 +2584,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             ]
             assert toks * cp_world_size <= cur_allgather_workspace.shape[0]
             cur_allgather_kvcache = cur_allgather_workspace[: toks * cp_world_size]
-            logger.info(
-                "chenxiao--debug cp_prefill_context allgather_before "
-                "chunk_idx=%d local_tokens=%d cp_world=%d",
-                int(i),
-                int(local_gathered_kvcache.shape[0]),
-                int(cp_world_size),
-            )
             if self.pcp_world_size > 1:
                 gathered = local_gathered_kvcache
                 if self.dcp_world_size > 1:
@@ -2657,12 +2594,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             else:
                 gathered = get_dcp_group().all_gather(local_gathered_kvcache, dim=0)
             cur_allgather_kvcache.copy_(gathered)
-            logger.info(
-                "chenxiao--debug cp_prefill_context allgather_after "
-                "chunk_idx=%d gathered_tokens=%d",
-                int(i),
-                int(cur_allgather_kvcache.shape[0]),
-            )
             assert (
                 cur_allgather_kvcache.shape[-1]
                 == self.kv_lora_rank + self.qk_rope_head_dim
@@ -2684,20 +2615,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 chunk_idx=i,
                 toks=toks,
             )
-            logger.info(
-                "chenxiao--debug cp_prefill_context reorg_done "
-                "chunk_idx=%d reorg_tokens=%d",
-                int(i),
-                int(kv_c_normed.shape[0]),
-            )
             if kv_c_normed.shape[0] == 0:
-                logger.info(
-                    "chenxiao--debug cp_prefill_context skip_empty_reorg "
-                    "chunk_idx=%d sum_seq_len=%d toks=%d",
-                    int(i),
-                    int(sum_seq_len),
-                    int(toks),
-                )
                 continue
 
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
@@ -2732,13 +2650,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 output_lse = output_lse_tmp
 
         if output is None:
-            logger.info(
-                "chenxiao--debug cp_prefill_context all_chunks_empty "
-                "q_tokens=%d num_prefills=%d num_dycp_reqs=%d",
-                int(q.shape[0]),
-                int(attn_metadata.num_prefills),
-                int(attn_metadata.num_dycp_reqs),
-            )
             output = torch.zeros(
                 q.shape[0],
                 self.num_heads,
@@ -2850,18 +2761,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 str(has_context_override),
             )
             has_context = has_context_override
-        logger.info(
-            "chenxiao--debug mla_forward_prefill start "
-            "q=%s kv_c_normed=%s k_pe=%s output=%s has_context=%s "
-            "num_prefills=%d num_dycp_reqs=%d",
-            str(tuple(q.shape)),
-            str(tuple(kv_c_normed.shape)),
-            str(tuple(k_pe.shape)),
-            str(tuple(output.shape)),
-            str(has_context),
-            int(attn_metadata.num_prefills),
-            int(attn_metadata.num_dycp_reqs),
-        )
+
         kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
             -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
         )
@@ -2880,11 +2780,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         if has_context:
             suffix_output, suffix_lse = output_prefill
             if (self.dcp_world_size * self.pcp_world_size > 1) :
-                logger.info(
-                    "chenxiao--debug mla_forward_prefill context_branch=pcp_dcp "
-                    "cp_world=%d",
-                    int(self.dcp_world_size * self.pcp_world_size),
-                )
                 context_output, context_lse = (
                     self._context_parallel_compute_prefill_context(
                         q,
@@ -2959,22 +2854,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 suffix_output=suffix_output,
                 suffix_lse=suffix_lse,
             )
-            logger.info(
-                "chenxiao--debug mla_forward_prefill merged "
-                "context_output=%s suffix_output=%s final_output=%s",
-                str(tuple(context_output.shape)),
-                str(tuple(suffix_output.shape)),
-                str(tuple(output.shape)),
-            )
         else:
             output_prefill = output_prefill[..., : v.shape[-1]].flatten(start_dim=-2)
             output.copy_(output_prefill)
-            logger.info(
-                "chenxiao--debug mla_forward_prefill no_context "
-                "output_prefill=%s final_output=%s",
-                str(tuple(output_prefill.shape)),
-                str(tuple(output.shape)),
-            )
 
     @abstractmethod
     def _forward_decode(
@@ -2999,14 +2881,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
-        logger.info(
-            "chenxiao--debug mla_forward entry "
-            "num_actual_tokens=%d num_prefills=%d num_decodes=%d num_dycp_reqs=%d",
-            int(attn_metadata.num_actual_tokens) if attn_metadata is not None else -1,
-            int(attn_metadata.num_prefills) if attn_metadata is not None else -1,
-            int(attn_metadata.num_decodes) if attn_metadata is not None else -1,
-            int(attn_metadata.num_dycp_reqs) if attn_metadata is not None else -1,
-        )
         if (
             attn_metadata is not None
             and attn_metadata.num_prefills > 0
@@ -3019,12 +2893,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             assert dp_attn_metadata is not None
             dycp_num_tokens = int(dycp_attn_metadata.num_actual_tokens)
             dp_num_tokens = int(dp_attn_metadata.num_actual_tokens)
-            logger.info(
-                "chenxiao--debug mla_forward mixed_prefill_split "
-                "dycp_tokens=%d dp_tokens=%d",
-                dycp_num_tokens,
-                dp_num_tokens,
-            )
 
             # Phase A: CP requests (DyCP collective path).
             output[:dycp_num_tokens] = self.forward_common(
@@ -3120,19 +2988,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         fp8_attention = self.kv_cache_dtype.startswith("fp8")
 
         num_actual_toks = attn_metadata.num_actual_tokens
-        logger.info(
-            "chenxiao--debug mla_forward_common start "
-            "num_actual_toks=%d num_prefills=%d num_decodes=%d num_dycp_reqs=%d "
-            "q=%s k_c_normed=%s k_pe=%s output=%s",
-            int(num_actual_toks),
-            int(attn_metadata.num_prefills),
-            int(attn_metadata.num_decodes),
-            int(attn_metadata.num_dycp_reqs),
-            str(tuple(q.shape)),
-            str(tuple(k_c_normed.shape)),
-            str(tuple(k_pe.shape)),
-            str(tuple(output.shape)),
-        )
 
         # Keep local KV tensors for cache update. Cross-rank all-gathered KV is
         # only used for attention computation.
@@ -3156,13 +3011,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 int(local_slot_mapping.shape[0]),
                 int(cache_tokens),
             )
-        logger.info(
-            "chenxiao--debug mla_forward_common cache "
-            "local_k_tokens=%d slot_tokens=%d cache_tokens=%d",
-            int(local_k_c_normed.shape[0]),
-            int(local_slot_mapping.shape[0]),
-            int(cache_tokens),
-        )
         if kv_cache.numel() > 0 and cache_tokens > 0:
             ops.concat_and_cache_mla(
                 local_k_c_normed[:cache_tokens],
@@ -3215,12 +3063,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 int(num_actual_toks),
                 int(k_c_normed.shape[0]),
             )
-            logger.info(
-                "chenxiao--debug mla_forward_common kv_gather pcp "
-                "local_tokens=%d gathered_tokens=%d",
-                int(num_actual_toks),
-                int(k_c_normed.shape[0]),
-            )
 
         elif (
             self.dycp_world_size > 1
@@ -3237,12 +3079,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             )
             logger.debug(
                 "dycp attn kv gathered local=%d gathered=%d",
-                int(attn_metadata.num_dycp_tokens),
-                int(k_c_normed.shape[0]),
-            )
-            logger.info(
-                "chenxiao--debug mla_forward_common kv_gather dycp "
-                "local_dycp_tokens=%d gathered_tokens=%d",
                 int(attn_metadata.num_dycp_tokens),
                 int(k_c_normed.shape[0]),
             )
@@ -3341,16 +3177,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 prefill_k_start = num_decode_tokens * self.dycp_world_size
             prefill_k_pe = k_pe[prefill_k_start:]
             prefill_k_c_normed = k_c_normed[prefill_k_start:]
-            logger.info(
-                "chenxiao--debug mla_forward_common prefill_slice "
-                "num_decode_tokens=%d prefill_k_start=%d prefill_q=%s "
-                "prefill_k_c_normed=%s prefill_k_pe=%s",
-                int(num_decode_tokens),
-                int(prefill_k_start),
-                str(tuple(prefill_q.shape)),
-                str(tuple(prefill_k_c_normed.shape)),
-                str(tuple(prefill_k_pe.shape)),
-            )
             self._forward_prefill(
                 prefill_q,
                 prefill_k_c_normed,

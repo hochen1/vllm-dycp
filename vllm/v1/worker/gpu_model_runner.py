@@ -795,8 +795,8 @@ class GPUModelRunner(
             )
 
         if scheduler_output.num_cp_request > 0:
-            logger.info(
-                "chenxiao--debug reorder_batch split_cp_and_normal "
+            logger.debug(
+                "reorder_batch split_cp_and_normal "
                 "num_cp_request=%d num_reqs=%d total_tokens=%d",
                 int(scheduler_output.num_cp_request),
                 int(self.input_batch.num_reqs),
@@ -1386,8 +1386,8 @@ class GPUModelRunner(
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
-        logger.info(
-            "chenxiao--debug prepare_inputs start "
+        logger.debug(
+            "prepare_inputs start "
             "num_reqs=%d total_tokens=%d num_dycp_reqs=%d pcp_world=%d dycp_world=%d",
             int(num_reqs),
             int(total_num_scheduled_tokens),
@@ -1439,13 +1439,6 @@ class GPUModelRunner(
                 int(sum(num_scheduled_tokens[:num_reqs])),
                 int(total_num_scheduled_tokens),
             )
-            logger.info(
-                "chenxiao--debug prepare_inputs pcp_update "
-                "num_reqs=%d local_tokens=%d total_tokens=%d",
-                int(num_reqs),
-                int(sum(num_scheduled_tokens[:num_reqs])),
-                int(total_num_scheduled_tokens),
-            )
 
             req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
             cu_num_tokens, _ = self._get_cumsum_and_arange(num_scheduled_tokens)
@@ -1484,13 +1477,7 @@ class GPUModelRunner(
                     int(num_dycp_tokens),
                     int(total_num_scheduled_tokens),
                 )
-                logger.info(
-                    "chenxiao--debug prepare_inputs dycp_update "
-                    "num_cp_request=%d local_dycp_tokens=%d total_tokens=%d",
-                    int(num_cp_request),
-                    int(num_dycp_tokens),
-                    int(total_num_scheduled_tokens),
-                )
+
 
                 total_num_pcp_scheduled_tokens = sum(num_scheduled_tokens[:num_cp_request])
                 req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
@@ -1597,13 +1584,6 @@ class GPUModelRunner(
             self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
 
         self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens)
-        logger.info(
-            "chenxiao--debug prepare_inputs slot_mapping_committed "
-            "total_tokens=%d num_cp_request=%d",
-            int(total_num_scheduled_tokens),
-            int(scheduler_output.num_cp_request),
-        )
-
         # Prepare the attention metadata.
         self.query_start_loc.np[0] = 0
         self.query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
@@ -1612,12 +1592,6 @@ class GPUModelRunner(
         self.query_start_loc.np[num_reqs + 1 :].fill(cu_num_tokens[-1])
         self.query_start_loc.copy_to_gpu()
         query_start_loc = self.query_start_loc.gpu[: num_reqs + 1]
-        logger.info(
-            "chenxiao--debug prepare_inputs query_start_loc "
-            "last=%d num_reqs=%d",
-            int(cu_num_tokens[-1]),
-            int(num_reqs),
-        )
 
         self.seq_lens.np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] + num_scheduled_tokens
@@ -1788,17 +1762,6 @@ class GPUModelRunner(
         num_tokens_padded = num_tokens_padded or num_tokens
         num_reqs_padded = num_reqs_padded or num_reqs
         assert num_reqs_padded is not None and num_tokens_padded is not None
-        logger.info(
-            "chenxiao--debug build_attn_metadata start "
-            "num_tokens=%d num_tokens_padded=%d num_reqs=%d num_reqs_padded=%d "
-            "num_dycp_reqs=%d num_dycp_tokens=%d",
-            int(num_tokens),
-            int(num_tokens_padded),
-            int(num_reqs),
-            int(num_reqs_padded),
-            int(num_dycp_reqs),
-            int(num_dycp_tokens),
-        )
 
         attn_metadata: PerLayerAttnMetadata = {}
         if ubatch_slices is not None:
@@ -1880,14 +1843,7 @@ class GPUModelRunner(
                     )
                 else:
                     slot_mapping = local_dycp_slot_mapping
-            logger.info(
-                "chenxiao--debug build_attn_metadata slot_mapping "
-                "kv_cache_gid=%d slot_tokens=%d num_tokens=%d num_tokens_padded=%d",
-                int(kv_cache_gid),
-                int(slot_mapping.shape[0]),
-                int(num_tokens),
-                int(num_tokens_padded),
-            )
+
             return blk_table_tensor, slot_mapping
 
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
@@ -1948,11 +1904,6 @@ class GPUModelRunner(
             cm_base.pcp_allgather_restore_idx=self.pcp_manager.pcp_allgather_restore_idx.gpu[
                     : num_tokens * self.pcp_world_size
                 ]
-            logger.info(
-                "chenxiao--debug build_attn_metadata pcp_restore_idx "
-                "size=%d",
-                int(cm_base.pcp_allgather_restore_idx.shape[0]),
-            )
 
         elif self.dycp_world_size > 1:
             if num_dycp_tokens > 0:
@@ -1960,13 +1911,7 @@ class GPUModelRunner(
                 cm_base.pcp_allgather_restore_idx = self.pcp_manager.pcp_allgather_restore_idx.gpu[
                     :dycp_allgather_size
                 ]
-                logger.info(
-                    "chenxiao--debug build_attn_metadata dycp_restore_idx "
-                    "size=%d local_dycp_tokens=%d dycp_world=%d",
-                    int(cm_base.pcp_allgather_restore_idx.shape[0]),
-                    int(num_dycp_tokens),
-                    int(self.dycp_world_size),
-                )
+
             self.cp_local_seq_lens.cpu[num_dycp_reqs:num_reqs].copy_(self.seq_lens.cpu[num_dycp_reqs:num_reqs])
             self.cp_local_seq_lens.cpu[num_reqs:].fill_(0)
             self.cp_local_seq_lens.copy_to_gpu(num_reqs_padded)
@@ -3336,14 +3281,7 @@ class GPUModelRunner(
                 num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
                 max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
                 num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
-                logger.info(
-                    "chenxiao--debug execute_model batch "
-                    "num_reqs=%d total_tokens=%d num_cp_request=%d max_sched=%d",
-                    int(num_reqs),
-                    int(num_tokens_unpadded),
-                    int(scheduler_output.num_cp_request),
-                    int(max_num_scheduled_tokens),
-                )
+
 
                 (
                     logits_indices,
@@ -3373,14 +3311,6 @@ class GPUModelRunner(
                         # Use max of both parts
                         max_num_scheduled_tokens = max(max_dycp_tokens, max_non_dycp_tokens)
                         num_tokens_unpadded = num_dycp_tokens_unpadded + num_non_dycp_tokens_unpadded
-                        logger.info(
-                            "chenxiao--debug execute_model dycp_split "
-                            "dycp_reqs=%d dycp_tokens=%d dp_tokens=%d max_sched=%d",
-                            int(num_dycp_reqs),
-                            int(num_dycp_tokens_unpadded),
-                            int(num_non_dycp_tokens_unpadded),
-                            int(max_num_scheduled_tokens),
-                        )
 
                 cascade_attn_prefix_lens = None
                 # Disable cascade attention when using microbatching (DBO)
@@ -3439,14 +3369,6 @@ class GPUModelRunner(
                     num_dycp_tokens = int(num_scheduled_tokens_np[:num_dycp_reqs].sum())
                 else:
                     num_dycp_tokens = 0
-                logger.info(
-                    "chenxiao--debug execute_model build_attn "
-                    "num_tokens_unpadded=%d num_tokens_padded=%d num_dycp_reqs=%d num_dycp_tokens=%d",
-                    int(num_tokens_unpadded),
-                    int(num_tokens_padded),
-                    int(scheduler_output.num_cp_request),
-                    int(num_dycp_tokens),
-                )
 
                 (attn_metadata, spec_decode_common_attn_metadata) = (
                     self._build_attention_metadata(
@@ -3515,15 +3437,6 @@ class GPUModelRunner(
                 # Common case.
                 hidden_states = model_output
                 aux_hidden_states = None
-            logger.info(
-                "chenxiao--debug postprocess model_output "
-                "hidden_shape=%s",
-                (
-                    str(tuple(hidden_states.shape))
-                    if isinstance(hidden_states, torch.Tensor)
-                    else type(hidden_states).__name__
-                ),
-            )
 
             if self.pcp_world_size > 1:
                 # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx
@@ -3539,13 +3452,6 @@ class GPUModelRunner(
                 num_cp_request = scheduler_output.num_cp_request
                 # 使用 PCP update 后的 num_scheduled_tokens_np
                 num_dycp_tokens_unpadded = int(num_scheduled_tokens_np[:num_cp_request].sum())
-                logger.info(
-                    "chenxiao--debug postprocess dycp_restore "
-                    "num_cp_request=%d num_dycp_tokens_unpadded=%d hidden_tokens=%d",
-                    int(num_cp_request),
-                    int(num_dycp_tokens_unpadded),
-                    int(hidden_states.shape[0]),
-                )
 
                 dycp_hidden_states = hidden_states[:num_dycp_tokens_unpadded]
                 non_dycp_hidden_states = hidden_states[num_dycp_tokens_unpadded:]
