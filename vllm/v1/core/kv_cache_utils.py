@@ -1278,12 +1278,13 @@ def _report_kv_cache_config(
     )
     dcp_size = vllm_config.parallel_config.decode_context_parallel_size
     pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
-    if pcp_size * dcp_size > 1:
-        num_tokens *= pcp_size * dcp_size
+    dycp_size = vllm_config.parallel_config.dp_per_domain
+    if pcp_size * dcp_size * dycp_size> 1:
+        num_tokens *= pcp_size * dcp_size * dycp_size
         logger.info(
             "Multiplying the GPU KV cache size by the cp_world_size %d "
             "(pcp_world_size %d * dcp_world_size %d).",
-            pcp_size * dcp_size,
+            pcp_size * dcp_size * dycp_size,
             pcp_size,
             dcp_size,
         )

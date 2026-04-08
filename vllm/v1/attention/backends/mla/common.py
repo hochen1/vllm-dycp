@@ -782,7 +782,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             # which would result in up-projected context being
             #   2*(192*128)*(64*1024) = 3gb
             # (assuming 192 QK head dim, 128 heads, and fp16)
-            64 * 1024,
+            # 64 * 1024,
+            1048576,
         )
 
         # Enforce that we enough for at least 1 page per request
@@ -1111,6 +1112,27 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_tokens
 
+        logger.info(
+            "chenxiao--debug build entry "
+            "num_reqs=%d num_tokens=%d max_query_len=%d max_seq_len=%d "
+            "num_decodes=%d num_decode_tokens=%d num_prefills=%d num_prefill_tokens=%d "
+            "num_dycp_reqs=%d num_dycp_tokens=%d "
+            "seq_lens_cpu=%s query_seq_lens_cpu=%s num_computed_tokens_cpu=%s",
+            int(num_reqs),
+            int(num_tokens),
+            int(max_query_len),
+            int(max_seq_len),
+            int(num_decodes),
+            int(num_decode_tokens),
+            int(num_prefills),
+            int(num_prefill_tokens),
+            int(num_dycp_reqs),
+            int(num_dycp_tokens),
+            str(seq_lens_cpu.tolist()),
+            str(query_seq_lens_cpu.tolist()),
+            str(num_computed_tokens_cpu.tolist()),
+        )
+
         prefill_metadata = None
         if num_prefills > 0:
             reqs_start = num_decodes  # prefill_start
@@ -1122,6 +1144,17 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             context_lens_cpu = num_computed_tokens_cpu[reqs_start:num_reqs]
             max_context_len_cpu = context_lens_cpu.max().item()
             num_prefills_with_context_cpu = (context_lens_cpu > 0).sum().item()
+
+            logger.info(
+                "chenxiao--debug build prefill_section "
+                "reqs_start=%d prefill_num_dycp_reqs=%d "
+                "context_lens_cpu=%s max_context_len_cpu=%d num_prefills_with_context=%d",
+                int(reqs_start),
+                int(prefill_num_dycp_reqs),
+                str(context_lens_cpu.tolist()),
+                int(max_context_len_cpu),
+                int(num_prefills_with_context_cpu),
+            )
             prefill_query_start_loc = (
                 query_start_loc[reqs_start:] - query_start_loc[reqs_start]
             )
@@ -1152,6 +1185,17 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 assert max_context_chunk > 0
                 num_chunks = cdiv(max_context_len_cpu, max_context_chunk)
 
+                logger.info(
+                    "chenxiao--debug build chunk_layout "
+                    "chunked_prefill_workspace_size=%d max_context_chunk=%d num_chunks=%d "
+                    "cp_virtual_block_size=%d cp_local_block_size=%d",
+                    int(self.chunked_prefill_workspace_size),
+                    int(max_context_chunk),
+                    int(num_chunks),
+                    int(self.cp_virtual_block_size),
+                    int(self.cp_local_block_size),
+                )
+
                 # if `max_context_chunk = 256`, `num_chunks = 3`, and
                 #   `num_prefills_with_context = 4`, create a tensor that looks
                 # like
@@ -1176,6 +1220,15 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     chunk_seq_lens, dim=1, out=cu_seq_lens_cpu[:, 1:], dtype=torch.int32
                 )
                 chunk_total_token = cu_seq_lens_cpu[:, -1]
+
+                logger.info(
+                    "chenxiao--debug build chunk_seq_lens "
+                    "chunk_starts=%s chunk_ends=%s chunk_seq_lens=%s chunk_total_token=%s",
+                    str(chunk_starts.tolist()),
+                    str(chunk_ends.tolist()),
+                    str(chunk_seq_lens.tolist()),
+                    str(chunk_total_token.tolist()),
+                )
 
                 max_token_num_over_chunk = chunk_total_token.max().item()
                 token_to_seq_tensor_cpu = torch.zeros(
@@ -1290,6 +1343,28 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     local_chunk_starts[:, :n_dycp] = dycp_local_chunk_starts
                     padded_local_chunk_seq_lens[:, :n_dycp] = dycp_padded_local_chunk_seq_lens
 
+                    logger.info(
+                        "chenxiao--debug build dycp_local_layout "
+                        "n_dycp=%d dycp_world_size=%d dycp_rank=%d "
+                        "padded_local_max_context_chunk=%d "
+                        "dycp_context_lens_cpu=%s "
+                        "dycp_padded_local_context_lens_cpu=%s "
+                        "dycp_local_chunk_starts=%s dycp_local_chunk_ends=%s "
+                        "dycp_padded_local_chunk_seq_lens=%s "
+                        "local_chunk_starts=%s padded_local_chunk_seq_lens=%s",
+                        int(n_dycp),
+                        int(self.dycp_world_size),
+                        int(self.dycp_rank),
+                        int(padded_local_max_context_chunk_across_ranks),
+                        str(dycp_context_lens_cpu.tolist()),
+                        str(dycp_padded_local_context_lens_cpu.tolist()),
+                        str(dycp_local_chunk_starts.tolist()),
+                        str(dycp_local_chunk_ends.tolist()),
+                        str(dycp_padded_local_chunk_seq_lens.tolist()),
+                        str(local_chunk_starts.tolist()),
+                        str(padded_local_chunk_seq_lens.tolist()),
+                    )
+
                     # Keep per-rank local context lens for DyCP requests; for non-DyCP
                     # requests, mark data as local-only on current rank.
                     local_context_lens_allranks = torch.zeros(
@@ -1311,6 +1386,16 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                         dim=1,
                         out=padded_local_cu_chunk_seq_lens_cpu[:, 1:],
                         dtype=torch.int32,
+                    )
+
+                    logger.info(
+                        "chenxiao--debug build dycp_cu_seq_lens "
+                        "local_context_lens_allranks=%s "
+                        "padded_local_cu_chunk_seq_lens_cpu=%s "
+                        "cu_seq_lens_cpu=%s",
+                        str(local_context_lens_allranks.tolist()),
+                        str(padded_local_cu_chunk_seq_lens_cpu.tolist()),
+                        str(cu_seq_lens_cpu.tolist()),
                     )
 
                 chunked_context_metadata_cls = (
@@ -2562,6 +2647,24 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             sum_seq_len = prefill_metadata.chunked_context.cu_seq_lens_lst[i][-1]
             if sum_seq_len == 0:
                 continue
+            logger.info(
+                "chenxiao--debug cp_prefill_context chunk_iter "
+                "chunk_idx=%d iters=%d toks=%d sum_seq_len=%d "
+                "max_seq_len=%d chunk_size=%d "
+                "padded_local_chunk_seq_lens=%s local_context_lens_allranks=%s "
+                "cu_seq_lens_lst=%s starts=%s padded_local_cu_seq_lens=%s",
+                int(i),
+                int(iters),
+                int(toks),
+                int(sum_seq_len),
+                int(prefill_metadata.chunked_context.max_seq_lens[i]),
+                int(prefill_metadata.chunked_context.chunk_size),
+                str(prefill_metadata.chunked_context.padded_local_chunk_seq_lens[i]),
+                str(prefill_metadata.chunked_context.local_context_lens_allranks),
+                str(prefill_metadata.chunked_context.cu_seq_lens_lst[i]),
+                str(prefill_metadata.chunked_context.starts[i].tolist()),
+                str(prefill_metadata.chunked_context.padded_local_cu_seq_lens[i].tolist()),
+            )
             ops.cp_gather_cache(
                 src_cache=kv_c_and_k_pe_cache,
                 dst=workspace,
@@ -2602,6 +2705,17 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 1
             ).split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
 
+            logger.info(
+                "chenxiao--debug cp_prefill_context after_allgather "
+                "chunk_idx=%d local_gathered_tokens=%d allgathered_tokens=%d "
+                "allgatered_kv_c_normed=%s allgatered_k_pe=%s",
+                int(i),
+                int(local_gathered_kvcache.shape[0]),
+                int(cur_allgather_kvcache.shape[0]),
+                str(tuple(allgatered_kv_c_normed.shape)),
+                str(tuple(allgatered_k_pe.shape)),
+            )
+
             kv_c_normed, k_pe = reorg_kvcache(
                 allgatered_kv_c_normed,
                 allgatered_k_pe,
@@ -2615,6 +2729,15 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 chunk_idx=i,
                 toks=toks,
             )
+
+            logger.info(
+                "chenxiao--debug cp_prefill_context after_reorg "
+                "chunk_idx=%d reorg_kv_c_normed=%s reorg_k_pe=%s",
+                int(i),
+                str(tuple(kv_c_normed.shape)),
+                str(tuple(k_pe.shape)),
+            )
+
             if kv_c_normed.shape[0] == 0:
                 continue
 
@@ -2688,15 +2811,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         )
         gathered_flags = get_dycp_group().all_gather(local_flag, dim=0)
         has_context_all_ranks = bool(torch.all(gathered_flags > 0.5).item())
-        has_context_any_rank = bool(torch.any(gathered_flags > 0.5).item())
-        if has_context_any_rank and not has_context_all_ranks:
-            logger.info(
-                "chenxiao--debug dycp_chunked_context_mismatch "
-                "local_has_context=%d gathered_flags=%s fallback_has_context=%s",
-                int(has_chunked_context_local),
-                str(gathered_flags.tolist()),
-                str(False),
-            )
         return has_context_all_ranks
 
     def _resolve_dycp_prefill_context_branch_consensus(
@@ -2721,18 +2835,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         )
         gathered_flags = get_dycp_group().all_gather(local_flag, dim=0)
         can_use_dycp_context_all_ranks = bool(torch.all(gathered_flags > 0.5).item())
-        can_use_dycp_context_any_rank = bool(torch.any(gathered_flags > 0.5).item())
-        if can_use_dycp_context_any_rank and not can_use_dycp_context_all_ranks:
-            logger.info(
-                "chenxiao--debug dycp_prefill_context_branch_mismatch "
-                "local_can_use_dycp=%d gathered_flags=%s "
-                "num_prefills=%d num_decodes=%d num_dycp_reqs=%d",
-                int(can_use_dycp_context_local),
-                str(gathered_flags.tolist()),
-                int(attn_metadata.num_prefills),
-                int(attn_metadata.num_decodes),
-                int(attn_metadata.num_dycp_reqs),
-            )
         return can_use_dycp_context_all_ranks
 
     def _forward_prefill(
@@ -2747,19 +2849,12 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         has_context_override: bool | None = None,
         can_use_dycp_context_override: bool | None = None,
     ) -> None:
-        # TODO (zyongye): Prefill function here
         assert attn_metadata.prefill is not None
         assert self.dcp_world_size is not None
         assert self.pcp_world_size is not None
 
         has_context = attn_metadata.prefill.chunked_context is not None
-        if has_context_override is not None and has_context_override != has_context:
-            logger.info(
-                "chenxiao--debug mla_forward_prefill override_has_context "
-                "local_has_context=%s resolved_has_context=%s",
-                str(has_context),
-                str(has_context_override),
-            )
+        if has_context_override is not None:
             has_context = has_context_override
 
         kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
@@ -2779,7 +2874,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
         if has_context:
             suffix_output, suffix_lse = output_prefill
-            if (self.dcp_world_size * self.pcp_world_size > 1) :
+            if self.dcp_world_size * self.pcp_world_size > 1:
                 context_output, context_lse = (
                     self._context_parallel_compute_prefill_context(
                         q,
@@ -2790,35 +2885,18 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     )
                 )
             else:
-                can_use_dycp_context_local = (
+                can_use_dycp_context = (
                     self.dycp_world_size > 1
                     and attn_metadata.prefill is not None
                     and attn_metadata.num_decodes == 0
                     and attn_metadata.num_dycp_reqs == attn_metadata.num_prefills
                     and attn_metadata.prefill.num_dycp_reqs > 0
-                    and attn_metadata.prefill.num_dycp_reqs
-                    == attn_metadata.num_prefills
+                    and attn_metadata.prefill.num_dycp_reqs == attn_metadata.num_prefills
                 )
-                can_use_dycp_context = can_use_dycp_context_local
                 if can_use_dycp_context_override is not None:
                     can_use_dycp_context = can_use_dycp_context_override
-                if can_use_dycp_context != can_use_dycp_context_local:
-                    logger.info(
-                        "chenxiao--debug mla_forward_prefill override_dycp_context_branch "
-                        "local_can_use_dycp=%s resolved_can_use_dycp=%s",
-                        str(can_use_dycp_context_local),
-                        str(can_use_dycp_context),
-                    )
 
                 if can_use_dycp_context:
-                    logger.info(
-                        "chenxiao--debug mla_forward_prefill context_branch=dycp "
-                        "dycp_world=%d num_dycp_reqs=%d num_prefills=%d num_decodes=%d",
-                        int(self.dycp_world_size),
-                        int(attn_metadata.prefill.num_dycp_reqs),
-                        int(attn_metadata.num_prefills),
-                        int(attn_metadata.num_decodes),
-                    )
                     context_output, context_lse = (
                         self._context_parallel_compute_prefill_context(
                             q,
@@ -2829,14 +2907,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                         )
                     )
                 else:
-                    logger.info(
-                        "chenxiao--debug mla_forward_prefill context_branch=local "
-                        "dycp_world=%d num_dycp_reqs=%d num_prefills=%d num_decodes=%d",
-                        int(self.dycp_world_size),
-                        int(attn_metadata.prefill.num_dycp_reqs),
-                        int(attn_metadata.num_prefills),
-                        int(attn_metadata.num_decodes),
-                    )
                     context_output, context_lse = self._compute_prefill_context(
                         q, kv_c_and_k_pe_cache, attn_metadata, k_scale
                     )
@@ -3031,13 +3101,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             attn_metadata,
             q.device,
         )
-        if has_chunked_context != has_chunked_context_local:
-            logger.info(
-                "chenxiao--debug mla_forward_common override_chunked_context "
-                "local_has_context=%s resolved_has_context=%s",
-                str(has_chunked_context_local),
-                str(has_chunked_context),
-            )
         dycp_kv_gathered = False
         k_c_normed = local_k_c_normed
         k_pe = local_k_pe
@@ -3118,48 +3181,22 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         has_decode = attn_metadata.num_decodes > 0
         has_prefill = attn_metadata.num_prefills > 0
         num_decode_tokens = attn_metadata.num_decode_tokens
-        prefill_has_context_local = (
-            has_prefill
-            and attn_metadata.prefill is not None
-            and attn_metadata.prefill.chunked_context is not None
-        )
         can_use_dycp_prefill_context_local = (
             self.dycp_world_size > 1
             and attn_metadata.num_dycp_reqs > 0
-            and prefill_has_context_local
+            and has_prefill
+            and attn_metadata.prefill is not None
+            and attn_metadata.prefill.chunked_context is not None
             and attn_metadata.num_decodes == 0
             and attn_metadata.num_dycp_reqs == attn_metadata.num_prefills
-            and attn_metadata.prefill is not None
             and attn_metadata.prefill.num_dycp_reqs > 0
             and attn_metadata.prefill.num_dycp_reqs == attn_metadata.num_prefills
         )
-        can_use_dycp_prefill_context = (
-            self._resolve_dycp_prefill_context_branch_consensus(
-                can_use_dycp_prefill_context_local,
-                attn_metadata,
-                q.device,
-            )
+        can_use_dycp_prefill_context = self._resolve_dycp_prefill_context_branch_consensus(
+            can_use_dycp_prefill_context_local,
+            attn_metadata,
+            q.device,
         )
-        if can_use_dycp_prefill_context != can_use_dycp_prefill_context_local:
-            logger.info(
-                "chenxiao--debug mla_forward_common override_dycp_prefill_context "
-                "local_can_use_dycp=%s resolved_can_use_dycp=%s "
-                "has_prefill=%s local_has_context=%s num_prefills=%d "
-                "num_decodes=%d num_dycp_reqs=%d",
-                str(can_use_dycp_prefill_context_local),
-                str(can_use_dycp_prefill_context),
-                str(has_prefill),
-                str(prefill_has_context_local),
-                int(attn_metadata.num_prefills),
-                int(attn_metadata.num_decodes),
-                int(attn_metadata.num_dycp_reqs),
-            )
-
-        # decode_q = q[:num_decode_tokens]
-
-        # prefill_q = q[num_decode_tokens:]
-        # prefill_k_pe = k_pe[num_decode_tokens:]
-        # prefill_k_c_normed = k_c_normed[num_decode_tokens:]
 
         if fp8_attention:
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
