@@ -695,6 +695,10 @@ class FusedMoE(CustomOp):
         return self.moe_parallel_config.pcp_size
 
     @property
+    def dycp_size(self):
+        return self.moe_parallel_config.dycp_size
+
+    @property
     def ep_size(self):
         return self.moe_parallel_config.ep_size
 
@@ -709,6 +713,10 @@ class FusedMoE(CustomOp):
     @property
     def pcp_rank(self):
         return self.moe_parallel_config.pcp_rank
+
+    @property
+    def dycp_rank(self):
+        return self.moe_parallel_config.dycp_rank
 
     @property
     def ep_rank(self):

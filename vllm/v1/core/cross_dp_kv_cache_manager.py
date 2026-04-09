@@ -94,52 +94,21 @@ class CrossDPKVCacheCoordinatorNoPrefixCache:
         world_size: int,
         seq_len: int,
         cp_kv_cache_interleave_size: int = 1,
-    ) -> list[list[int]]:
-        """Calculate local seq_lens for all DCP ranks given a list of sequence lengths.
-        
-        While using dcp, kv_cache size stored on each rank may be different.
-        This function calculates the split decode seq_lens for all dcp ranks.
-        
-        Args:
-            seq_len: sequence lengths of the request
-            dcp_size: Number of DCP ranks
-            cp_kv_cache_interleave_size: Interleave size for KV cache
-            
-        Returns:
-            List of lists, where each inner list contains the local seq_len for 
-            all requests on that rank.
-            Format: [[rank0_req0, rank0_req1, ...], [rank1_req0, rank1_req1, ...], ...]
+    ) -> list[int]:
+        """Compute per-rank token budget for cross-DP KV allocation.
+
+        Worker-side DyCP prefill pads each CP request to a multiple of
+        ``2 * world_size`` and then uses equal token counts on all ranks.
+        We mirror the same policy here to keep block allocation and worker-side
+        slot mapping consistent.
         """
-        cp_kv_cache_interleave_size = self.block_size
-        # Initialize result: list of lists for each rank
-        result = []
-        
-        # Process each request
-        # for req_idx, seq_len in enumerate(seq_lens):
-        # Calculate base: the part that's evenly distributed
-        base = (
-            (seq_len // cp_kv_cache_interleave_size // world_size)
-            * cp_kv_cache_interleave_size
-        )
-        
-        # Calculate remainder: the part that needs to be distributed
-        remainder = seq_len - base * world_size
-        
-        # Distribute remainder across ranks
-        for rank in range(world_size):
-            rank_offset = rank * cp_kv_cache_interleave_size
-            # Calculate how much of the remainder this rank gets
-            # Clip to [0, cp_kv_cache_interleave_size]
-            rank_remainder = max(
-                0,
-                min(
-                    cp_kv_cache_interleave_size,
-                    remainder - rank_offset
-                )
-            )
-            local_seq_len = base + rank_remainder
-            result.append(local_seq_len)
-        return result
+        if world_size <= 1:
+            return [seq_len]
+
+        # Align with PCPManager.update_tokens_for_pcp in worker path.
+        num_padded_tokens = cdiv(seq_len, 2 * world_size) * (2 * world_size)
+        local_seq_len = num_padded_tokens // world_size
+        return [local_seq_len for _ in range(world_size)]
 
     def _allocate_blocks_to_cp_ranks(
         self,
