@@ -359,6 +359,15 @@ class Worker(WorkerBase):
             self.requested_memory - profile_result.non_kv_cache_memory
         )
 
+        # Reserve memory for DyCP KV allgather temporary buffers
+        dycp_reserve = self.model_runner.get_dycp_allgather_reserve_bytes()
+        if dycp_reserve > 0:
+            self.available_kv_cache_memory_bytes -= dycp_reserve
+            logger.info(
+                "Reserved %.2f GiB for DyCP KV allgather buffers",
+                dycp_reserve / GiB_bytes,
+            )
+
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
         logger.debug(
             "Initial free memory: %.2f GiB; Requested memory: %.2f (util), %.2f GiB",

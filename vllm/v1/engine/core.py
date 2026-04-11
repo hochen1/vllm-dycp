@@ -143,6 +143,7 @@ class EngineCore:
             vllm_config.cache_config.block_size
             * vllm_config.parallel_config.decode_context_parallel_size
             * vllm_config.parallel_config.prefill_context_parallel_size
+            * max(vllm_config.parallel_config.dp_per_domain, 1)
         )
 
         self.scheduler: SchedulerInterface = Scheduler(
@@ -1166,6 +1167,11 @@ class EngineCoreProc(EngineCore):
             )
         elif request_type == EngineCoreRequestType.EXECUTOR_FAILED:
             raise RuntimeError("Executor failed.")
+        elif request_type == EngineCoreRequestType.START_DP_WAVE:
+            # Non-DP cores may still receive this control message through shared
+            # paths; treat it as a no-op here. DP-specific behavior is handled
+            # in DPEngineCoreProc._handle_client_request.
+            return
         else:
             logger.error(
                 "Unrecognized input request type encountered: %s", request_type
