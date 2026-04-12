@@ -16,7 +16,7 @@ from vllm.attention.backends.abstract import (
     is_quantized_kv_cache,
 )
 from vllm.attention.layer import Attention
-from vllm.attention.ops.common import cp_lse_ag_out_rs, dycp_lse_out_ar, cp_lse_ag_out_ar
+from vllm.attention.ops.common import cp_lse_ag_out_rs, cp_lse_ag_out_ar
 from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.attention.utils.fa_utils import (
     flash_attn_supports_fp8,
@@ -46,11 +46,36 @@ from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     get_cp_local_seq_lens,
     get_kv_cache_layout,
+    get_pcp_kv_indices,
+    get_pcp_query_indices,
+    pcp_kv_allgather_and_restore,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
+
+
+def _build_cu_seq_lens(seq_lens: torch.Tensor, device: torch.device) -> torch.Tensor:
+    cu_seq_lens = torch.zeros(
+        (seq_lens.numel() + 1,), dtype=torch.int32, device=device
+    )
+    if seq_lens.numel() > 0:
+        torch.cumsum(seq_lens.to(torch.int32), dim=0, out=cu_seq_lens[1:])
+    return cu_seq_lens
+
+
+def _max_seq_len(seq_lens: torch.Tensor) -> int:
+    return int(seq_lens.max().item()) if seq_lens.numel() > 0 else 0
+
+
+@dataclass
+class DyCPPrefillMetadata:
+    query_head_indices: torch.Tensor
+    query_tail_indices: torch.Tensor
+    kv_head_indices: torch.Tensor
+    kv_tail_indices: torch.Tensor
+    output_restore_idx: torch.Tensor
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -217,6 +242,9 @@ class FlashAttentionMetadata:
     num_decode_tokens: int = 0
     num_prefill_tokens: int = 0
     num_dycp_reqs: int = 0
+    num_dycp_tokens: int = 0
+    pcp_allgather_restore_idx: torch.Tensor | None = None
+    dycp_prefill_metadata: DyCPPrefillMetadata | None = None
 
     causal: bool = True
 
@@ -343,7 +371,10 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         max_query_len = common_attn_metadata.max_query_len
         max_seq_len = common_attn_metadata.max_seq_len
         query_start_loc = common_attn_metadata.query_start_loc
-        seq_lens = common_attn_metadata.seq_lens
+        # Use local clones here because DyCP/DCP metadata preparation may
+        # rewrite per-request sequence lengths.
+        seq_lens = common_attn_metadata.seq_lens.clone()
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu.clone()
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
         causal = common_attn_metadata.causal
@@ -422,6 +453,58 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 require_uniform=True,
             )
         )
+        dycp_prefill_metadata = None
+        prefill_num_dycp_reqs = max(0, num_dycp_reqs - num_decodes)
+        if (
+            self.dycp_world_size > 1
+            and num_decodes == 0
+            and num_prefills > 0
+            and prefill_num_dycp_reqs == num_prefills
+        ):
+            cp_prefill_query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[
+                : prefill_num_dycp_reqs + 1
+            ].clone()
+            prefill_query_lens_cpu = (
+                cp_prefill_query_start_loc_cpu[1:]
+                - cp_prefill_query_start_loc_cpu[:-1]
+            )
+            # The GQA DyCP prefill path below assumes prefill-only without a
+            # pre-existing local context.
+            if torch.equal(
+                seq_lens_cpu[:prefill_num_dycp_reqs],
+                prefill_query_lens_cpu,
+            ):
+                q_head_idx, q_tail_idx = get_pcp_query_indices(
+                    cp_prefill_query_start_loc_cpu
+                )
+                output_restore_idx = torch.cat(
+                    [q_head_idx, q_tail_idx]
+                ).argsort()
+                prefill_kv_start_loc_cpu = (
+                    cp_prefill_query_start_loc_cpu * self.dycp_world_size
+                )
+                kv_head_idx, kv_tail_idx = get_pcp_kv_indices(
+                    prefill_kv_start_loc_cpu,
+                    self.dycp_rank,
+                    self.dycp_world_size,
+                )
+                dycp_prefill_metadata = DyCPPrefillMetadata(
+                    query_head_indices=q_head_idx.to(
+                        self.device, dtype=torch.int64, non_blocking=True
+                    ),
+                    query_tail_indices=q_tail_idx.to(
+                        self.device, dtype=torch.int64, non_blocking=True
+                    ),
+                    kv_head_indices=kv_head_idx.to(
+                        self.device, dtype=torch.int64, non_blocking=True
+                    ),
+                    kv_tail_indices=kv_tail_idx.to(
+                        self.device, dtype=torch.int64, non_blocking=True
+                    ),
+                    output_restore_idx=output_restore_idx.to(
+                        self.device, dtype=torch.int64, non_blocking=True
+                    ),
+                )
         if self.dcp_world_size > 1:
             query_kv_lens = query_start_loc[1:] - query_start_loc[:-1]
             dcp_context_kv_lens = seq_lens - query_kv_lens
@@ -450,23 +533,26 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 causal=False,
             )
         elif self.dycp_world_size > 1:
-            num_dycp_reqs = common_attn_metadata.num_dycp_reqs
-            seq_lens[:num_dycp_reqs] = get_cp_local_seq_lens(
-                seq_lens[:num_dycp_reqs],
-                self.dycp_world_size,
-                self.dycp_rank,
-                self.cp_kv_cache_interleave_size,
-            )
-            max_seq_len = seq_lens.max().item()
-            
-            scheduler_metadata = schedule(
-                batch_size=num_reqs,
-                cu_query_lens=query_start_loc,
-                max_query_len=max_query_len,
-                seqlens=seq_lens,
-                max_seq_len=max_seq_len,
-                causal=False,
-            )
+            if dycp_prefill_metadata is not None:
+                scheduler_metadata = None
+            else:
+                num_dycp_reqs = common_attn_metadata.num_dycp_reqs
+                seq_lens[:num_dycp_reqs] = get_cp_local_seq_lens(
+                    seq_lens[:num_dycp_reqs],
+                    self.dycp_world_size,
+                    self.dycp_rank,
+                    self.cp_kv_cache_interleave_size,
+                )
+                max_seq_len = seq_lens.max().item()
+
+                scheduler_metadata = schedule(
+                    batch_size=num_reqs,
+                    cu_query_lens=query_start_loc,
+                    max_query_len=max_query_len,
+                    seqlens=seq_lens,
+                    max_seq_len=max_seq_len,
+                    causal=False,
+                )
 
         elif use_cascade:
             cu_prefix_query_lens = torch.tensor(
@@ -537,6 +623,9 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             num_decode_tokens=num_decode_tokens,
             num_prefill_tokens=num_prefill_tokens,
             num_dycp_reqs=num_dycp_reqs,
+            num_dycp_tokens=common_attn_metadata.num_dycp_tokens,
+            pcp_allgather_restore_idx=common_attn_metadata.pcp_allgather_restore_idx,
+            dycp_prefill_metadata=dycp_prefill_metadata,
         )
         return attn_metadata
 
@@ -604,6 +693,116 @@ class FlashAttentionImpl(AttentionImpl):
             )
 
         self.supports_quant_query_input = True
+
+    def _use_dycp_prefill_dual_chunk(
+        self, attn_metadata: FlashAttentionMetadata
+    ) -> bool:
+        return (
+            self.dycp_world_size > 1
+            and attn_metadata.num_decodes == 0
+            and attn_metadata.num_prefills > 0
+            and attn_metadata.num_prefills == attn_metadata.num_dycp_reqs
+            and attn_metadata.num_prefill_tokens == attn_metadata.num_dycp_tokens
+            and attn_metadata.pcp_allgather_restore_idx is not None
+            and attn_metadata.dycp_prefill_metadata is not None
+        )
+
+    def _forward_with_dycp_prefill(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        output: torch.Tensor,
+        attn_metadata: FlashAttentionMetadata,
+    ) -> torch.Tensor:
+        assert attn_metadata.pcp_allgather_restore_idx is not None
+        assert attn_metadata.dycp_prefill_metadata is not None
+
+        prefill_tokens = attn_metadata.num_prefill_tokens
+        prefill_q = query[:prefill_tokens]
+        prefill_k = key[:prefill_tokens]
+        prefill_v = value[:prefill_tokens]
+        full_k, full_v = pcp_kv_allgather_and_restore(
+            prefill_k,
+            prefill_v,
+            attn_metadata.num_dycp_tokens,
+            attn_metadata.pcp_allgather_restore_idx,
+            get_dycp_group(),
+        )
+
+        q_seq_lens = (
+            attn_metadata.query_start_loc[1 : attn_metadata.num_prefills + 1]
+            - attn_metadata.query_start_loc[: attn_metadata.num_prefills]
+        ).to(torch.int32)
+        q_head_seq_lens = torch.div(q_seq_lens, 2, rounding_mode="floor")
+        q_tail_seq_lens = q_seq_lens - q_head_seq_lens
+        kv_head_seq_lens = torch.div(
+            q_seq_lens * (self.dycp_rank + 1),
+            2,
+            rounding_mode="floor",
+        )
+        kv_tail_seq_lens = torch.div(
+            q_seq_lens * (2 * self.dycp_world_size - self.dycp_rank),
+            2,
+            rounding_mode="floor",
+        )
+
+        dycp_meta = attn_metadata.dycp_prefill_metadata
+        descale_shape = (attn_metadata.num_prefills, self.num_kv_heads)
+        q_descale = layer._q_scale.expand(descale_shape)
+        k_descale = layer._k_scale.expand(descale_shape)
+        v_descale = layer._v_scale.expand(descale_shape)
+
+        def run_dual_chunk(
+            q_indices: torch.Tensor,
+            kv_indices: torch.Tensor,
+            q_lens: torch.Tensor,
+            kv_lens: torch.Tensor,
+        ) -> torch.Tensor:
+            if q_indices.numel() == 0:
+                return prefill_q[:0]
+            return flash_attn_varlen_func(
+                q=torch.index_select(prefill_q, 0, q_indices),
+                k=torch.index_select(full_k, 0, kv_indices),
+                v=torch.index_select(full_v, 0, kv_indices),
+                out=None,
+                cu_seqlens_q=_build_cu_seq_lens(q_lens, prefill_q.device),
+                cu_seqlens_k=_build_cu_seq_lens(kv_lens, prefill_q.device),
+                max_seqlen_q=_max_seq_len(q_lens),
+                max_seqlen_k=_max_seq_len(kv_lens),
+                softmax_scale=self.scale,
+                causal=True,
+                alibi_slopes=self.alibi_slopes,
+                window_size=self.sliding_window,
+                softcap=self.logits_soft_cap,
+                fa_version=self.vllm_flash_attn_version,
+                q_descale=q_descale,
+                k_descale=k_descale,
+                v_descale=v_descale,
+                s_aux=self.sinks,
+            )
+
+        output_head = run_dual_chunk(
+            dycp_meta.query_head_indices,
+            dycp_meta.kv_head_indices,
+            q_head_seq_lens,
+            kv_head_seq_lens,
+        )
+        output_tail = run_dual_chunk(
+            dycp_meta.query_tail_indices,
+            dycp_meta.kv_tail_indices,
+            q_tail_seq_lens,
+            kv_tail_seq_lens,
+        )
+
+        restored = torch.index_select(
+            torch.cat([output_head, output_tail], dim=0),
+            0,
+            dycp_meta.output_restore_idx,
+        )
+        output[:prefill_tokens].copy_(restored)
+        return output
 
     def forward(
         self,
@@ -713,6 +912,16 @@ class FlashAttentionImpl(AttentionImpl):
             )
             key_cache = key_cache.view(dtype)
             value_cache = value_cache.view(dtype)
+
+        if self._use_dycp_prefill_dual_chunk(attn_metadata):
+            return self._forward_with_dycp_prefill(
+                layer,
+                query[:num_actual_tokens],
+                key[:num_actual_tokens],
+                value[:num_actual_tokens],
+                output[:num_actual_tokens],
+                attn_metadata,
+            )
 
         if not attn_metadata.use_cascade:
             cu_seqlens_q = attn_metadata.query_start_loc

@@ -54,8 +54,11 @@ from vllm.v1.attention.backends.utils import (
     KVCacheLayoutType,
     get_cp_local_seq_lens,
     get_kv_cache_layout,
+    get_pcp_kv_indices,
+    get_pcp_query_indices,
     get_per_layer_parameters,
     infer_global_hyperparameters,
+    pcp_kv_allgather_and_restore,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -68,6 +71,26 @@ FP4_DTYPE = torch.uint8
 logger = init_logger(__name__)
 
 trtllm_gen_workspace_buffer = None
+
+
+def _build_cu_seq_lens_cpu(seq_lens: torch.Tensor) -> torch.Tensor:
+    cu_seq_lens = torch.zeros((seq_lens.numel() + 1,), dtype=torch.int32, device="cpu")
+    if seq_lens.numel() > 0:
+        torch.cumsum(seq_lens.to(torch.int32), dim=0, out=cu_seq_lens[1:])
+    return cu_seq_lens
+
+
+@dataclass
+class DyCPPrefillMetadata:
+    query_head_indices: torch.Tensor
+    query_tail_indices: torch.Tensor
+    kv_head_indices: torch.Tensor
+    kv_tail_indices: torch.Tensor
+    output_restore_idx: torch.Tensor
+    q_head_cu_seq_lens_cpu: torch.Tensor
+    q_tail_cu_seq_lens_cpu: torch.Tensor
+    kv_head_cu_seq_lens_cpu: torch.Tensor
+    kv_tail_cu_seq_lens_cpu: torch.Tensor
 
 
 def _get_trtllm_gen_workspace_buffer():
@@ -416,6 +439,10 @@ class FlashInferMetadata:
     paged_kv_indptr_gpu: torch.Tensor | None = None
 
     num_dycp_reqs: int = 0
+    num_dycp_tokens: int = 0
+    pcp_allgather_restore_idx: torch.Tensor | None = None
+    dycp_prefill_metadata: DyCPPrefillMetadata | None = None
+    dycp_prefill_wrapper: BatchPrefillWithRaggedKVCacheWrapper | None = None
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     reorder_batch_threshold: int = 1
@@ -531,6 +558,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=can_use_trtllm)
 
         self._cascade_wrapper = None  # Wrapper for cascade attention
+        self._dycp_prefill_wrapper = None
 
         # Global hyperparameters shared by all attention layers
         # TODO: discard this for trtllm-gen backend
@@ -630,6 +658,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         assert self._prefill_wrapper is not None
         return self._prefill_wrapper
 
+    def _get_dycp_prefill_wrapper(self) -> BatchPrefillWithRaggedKVCacheWrapper:
+        if self._dycp_prefill_wrapper is None:
+            self._dycp_prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
+                self._get_workspace_buffer(),
+                get_kv_cache_layout(),
+            )
+        assert self._dycp_prefill_wrapper is not None
+        return self._dycp_prefill_wrapper
+
     def _get_decode_wrapper(self, batch_size: int, use_cudagraph: bool = False):
         if use_cudagraph:
             decode_wrapper = self._decode_wrappers_cudagraph.get(batch_size, None)
@@ -693,9 +730,89 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         max_q_len = common_attn_metadata.max_query_len
         max_seq_len = common_attn_metadata.max_seq_len
         seq_lens = common_attn_metadata.seq_lens
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu.clone()
         block_table_tensor = common_attn_metadata.block_table_tensor
         qo_indptr_cpu = common_attn_metadata.query_start_loc_cpu
+        dycp_prefill_metadata = None
+        prefill_num_dycp_reqs = max(0, common_attn_metadata.num_dycp_reqs - num_decodes)
+        if (
+            self.dycp_world_size > 1
+            and num_decodes == 0
+            and num_prefills > 0
+            and prefill_num_dycp_reqs == num_prefills
+        ):
+            cp_prefill_query_start_loc_cpu = qo_indptr_cpu[
+                : prefill_num_dycp_reqs + 1
+            ].clone()
+            prefill_query_lens_cpu = (
+                cp_prefill_query_start_loc_cpu[1:]
+                - cp_prefill_query_start_loc_cpu[:-1]
+            )
+            # Only enable the special DyCP path for pure prefill requests that
+            # do not already have local context cached.
+            if torch.equal(
+                seq_lens_cpu[:prefill_num_dycp_reqs],
+                prefill_query_lens_cpu,
+            ):
+                q_head_idx, q_tail_idx = get_pcp_query_indices(
+                    cp_prefill_query_start_loc_cpu
+                )
+                output_restore_idx = torch.cat(
+                    [q_head_idx, q_tail_idx]
+                ).argsort()
+                prefill_kv_start_loc_cpu = (
+                    cp_prefill_query_start_loc_cpu * self.dycp_world_size
+                )
+                kv_head_idx, kv_tail_idx = get_pcp_kv_indices(
+                    prefill_kv_start_loc_cpu,
+                    self.dycp_rank,
+                    self.dycp_world_size,
+                )
+                q_head_seq_lens_cpu = torch.div(
+                    prefill_query_lens_cpu,
+                    2,
+                    rounding_mode="floor",
+                )
+                q_tail_seq_lens_cpu = prefill_query_lens_cpu - q_head_seq_lens_cpu
+                kv_head_seq_lens_cpu = torch.div(
+                    prefill_query_lens_cpu * (self.dycp_rank + 1),
+                    2,
+                    rounding_mode="floor",
+                )
+                kv_tail_seq_lens_cpu = torch.div(
+                    prefill_query_lens_cpu * (2 * self.dycp_world_size - self.dycp_rank),
+                    2,
+                    rounding_mode="floor",
+                )
+                dycp_prefill_metadata = DyCPPrefillMetadata(
+                    query_head_indices=q_head_idx.to(
+                        self.device, dtype=torch.int64, non_blocking=True
+                    ),
+                    query_tail_indices=q_tail_idx.to(
+                        self.device, dtype=torch.int64, non_blocking=True
+                    ),
+                    kv_head_indices=kv_head_idx.to(
+                        self.device, dtype=torch.int64, non_blocking=True
+                    ),
+                    kv_tail_indices=kv_tail_idx.to(
+                        self.device, dtype=torch.int64, non_blocking=True
+                    ),
+                    output_restore_idx=output_restore_idx.to(
+                        self.device, dtype=torch.int64, non_blocking=True
+                    ),
+                    q_head_cu_seq_lens_cpu=_build_cu_seq_lens_cpu(
+                        q_head_seq_lens_cpu
+                    ),
+                    q_tail_cu_seq_lens_cpu=_build_cu_seq_lens_cpu(
+                        q_tail_seq_lens_cpu
+                    ),
+                    kv_head_cu_seq_lens_cpu=_build_cu_seq_lens_cpu(
+                        kv_head_seq_lens_cpu
+                    ),
+                    kv_tail_cu_seq_lens_cpu=_build_cu_seq_lens_cpu(
+                        kv_tail_seq_lens_cpu
+                    ),
+                )
 
         if self.dcp_world_size > 1:
             if num_prefills > 0:
@@ -715,7 +832,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self.dcp_rank,
                 self.dcp_kv_cache_interleave_size,
             )
-        if self.dycp_world_size > 1:
+        if self.dycp_world_size > 1 and dycp_prefill_metadata is None:
             num_dycp_reqs = common_attn_metadata.num_dycp_reqs
             seq_lens_cpu[:num_dycp_reqs] = get_cp_local_seq_lens(
                 seq_lens_cpu[:num_dycp_reqs],
@@ -805,6 +922,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             has_sinks=self.has_sinks,
             has_spec=uses_spec_reorder,
         )
+        if dycp_prefill_metadata is not None:
+            # This path uses explicit dual-chunk ragged prefill, not TRTLLM prefill.
+            prefill_use_trtllm = False
         decode_use_trtllm = (
             self.use_trtllm_decode_attention and (self.dcp_world_size * self.dycp_world_size) <= 1
         )
@@ -850,7 +970,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
             use_cascade=use_cascade,
-            num_dycp_reqs = common_attn_metadata.num_dycp_reqs
+            num_dycp_reqs=common_attn_metadata.num_dycp_reqs,
+            num_dycp_tokens=common_attn_metadata.num_dycp_tokens,
+            pcp_allgather_restore_idx=common_attn_metadata.pcp_allgather_restore_idx,
+            dycp_prefill_metadata=dycp_prefill_metadata,
+            dycp_prefill_wrapper=(
+                self._get_dycp_prefill_wrapper()
+                if dycp_prefill_metadata is not None
+                else None
+            ),
         )
 
         paged_kv_indptr_cpu = self.paged_kv_indptr_cpu[: 1 + num_reqs]
@@ -1083,6 +1211,93 @@ class FlashInferImpl(AttentionImpl):
         if self.sinks is not None and self.sinks.dtype != torch.float32:
             self.sinks = self.sinks.to(torch.float32)
 
+    def _use_dycp_prefill_dual_chunk(
+        self, attn_metadata: FlashInferMetadata
+    ) -> bool:
+        return (
+            self.dycp_world_size > 1
+            and attn_metadata.num_decodes == 0
+            and attn_metadata.num_prefills > 0
+            and attn_metadata.num_prefills == attn_metadata.num_dycp_reqs
+            and attn_metadata.num_prefill_tokens == attn_metadata.num_dycp_tokens
+            and attn_metadata.pcp_allgather_restore_idx is not None
+            and attn_metadata.dycp_prefill_metadata is not None
+            and attn_metadata.dycp_prefill_wrapper is not None
+        )
+
+    def _forward_with_dycp_prefill(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        output: torch.Tensor,
+        attn_metadata: FlashInferMetadata,
+    ) -> torch.Tensor:
+        assert attn_metadata.pcp_allgather_restore_idx is not None
+        assert attn_metadata.dycp_prefill_metadata is not None
+
+        prefill_tokens = attn_metadata.num_prefill_tokens
+        prefill_q = query[:prefill_tokens]
+        prefill_k = key[:prefill_tokens]
+        prefill_v = value[:prefill_tokens]
+        full_k, full_v = pcp_kv_allgather_and_restore(
+            prefill_k,
+            prefill_v,
+            attn_metadata.num_dycp_tokens,
+            attn_metadata.pcp_allgather_restore_idx,
+            get_dycp_group(),
+        )
+        dycp_meta = attn_metadata.dycp_prefill_metadata
+        wrapper = attn_metadata.dycp_prefill_wrapper
+        assert wrapper is not None
+
+        def run_dual_chunk(
+            q_indices: torch.Tensor,
+            kv_indices: torch.Tensor,
+            q_cu_seq_lens_cpu: torch.Tensor,
+            kv_cu_seq_lens_cpu: torch.Tensor,
+        ) -> torch.Tensor:
+            if q_indices.numel() == 0:
+                return prefill_q[:0]
+            wrapper.plan(
+                qo_indptr=q_cu_seq_lens_cpu,
+                kv_indptr=kv_cu_seq_lens_cpu,
+                num_qo_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+                head_dim_qk=self.head_dim,
+                head_dim_vo=self.head_dim,
+                causal=True,
+                sm_scale=self.scale,
+                window_left=self.window_left,
+                logits_soft_cap=self.logits_soft_cap,
+                q_data_type=attn_metadata.q_data_type,
+            )
+            return wrapper.run(
+                torch.index_select(prefill_q, 0, q_indices),
+                torch.index_select(full_k, 0, kv_indices),
+                torch.index_select(full_v, 0, kv_indices),
+            )
+
+        output_head = run_dual_chunk(
+            dycp_meta.query_head_indices,
+            dycp_meta.kv_head_indices,
+            dycp_meta.q_head_cu_seq_lens_cpu,
+            dycp_meta.kv_head_cu_seq_lens_cpu,
+        )
+        output_tail = run_dual_chunk(
+            dycp_meta.query_tail_indices,
+            dycp_meta.kv_tail_indices,
+            dycp_meta.q_tail_cu_seq_lens_cpu,
+            dycp_meta.kv_tail_cu_seq_lens_cpu,
+        )
+        restored = torch.index_select(
+            torch.cat([output_head, output_tail], dim=0),
+            0,
+            dycp_meta.output_restore_idx,
+        )
+        output[:prefill_tokens].copy_(restored)
+        return output
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -1204,6 +1419,15 @@ class FlashInferImpl(AttentionImpl):
         value = value[:num_actual_tokens]
         output_padded = output
         output = output[:num_actual_tokens]
+
+        if self._use_dycp_prefill_dual_chunk(attn_metadata):
+            return self._forward_with_dycp_prefill(
+                query,
+                key,
+                value,
+                output,
+                attn_metadata,
+            )
 
         if attn_metadata.use_cascade:
             # Cascade attention (rare case).
