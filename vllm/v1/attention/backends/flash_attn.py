@@ -33,7 +33,7 @@ if is_flash_attn_varlen_func_available():
     )
 from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
 from vllm.config.cache import CacheDType
-from vllm.distributed.parallel_state import get_dcp_group, get_dycp_group
+from vllm.distributed.parallel_state import get_dcp_group, get_dycp_group, get_pcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -46,6 +46,9 @@ from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     get_cp_local_seq_lens,
     get_kv_cache_layout,
+    get_pcp_kv_indices,
+    get_pcp_query_indices,
+    pcp_kv_allgather_and_restore,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -212,11 +215,26 @@ class FlashAttentionMetadata:
     prefix_scheduler_metadata: torch.Tensor | None = None
     max_num_splits: int = 0
     # For dycp
-    num_decodes:int = 0
+    num_decodes: int = 0
     num_prefills: int = 0
     num_decode_tokens: int = 0
     num_prefill_tokens: int = 0
     num_dycp_reqs: int = 0
+    num_dycp_tokens: int = 0
+
+    # DyCP prefill: DualChunkSwap indices
+    dycp_prefill_q_head_indices: torch.Tensor | None = None
+    dycp_prefill_q_tail_indices: torch.Tensor | None = None
+    dycp_prefill_kv_head_indices: torch.Tensor | None = None
+    dycp_prefill_kv_tail_indices: torch.Tensor | None = None
+    dycp_prefill_output_restore_idx: torch.Tensor | None = None
+
+    # DyCP prefill: context attention (local KV cache portion)
+    dycp_prefill_context_kv_lens: torch.Tensor | None = None
+    max_dycp_prefill_context_kv_len: int = 0
+
+    # DyCP prefill: KV allgather restore index
+    pcp_allgather_restore_idx: torch.Tensor | None = None
 
     causal: bool = True
 
@@ -231,6 +249,91 @@ def _get_sliding_window_configs(
         assert isinstance(layer.impl, FlashAttentionImpl)
         sliding_window_configs.add(layer.impl.sliding_window)
     return sliding_window_configs
+
+
+def split_flash_attn_metadata(
+    attn_metadata: FlashAttentionMetadata,
+) -> tuple[FlashAttentionMetadata, FlashAttentionMetadata]:
+    """Split mixed DyCP+DP prefill metadata into DyCP part and DP part.
+
+    Assumes request order: [dycp requests..., dp requests...].
+    """
+    n_dycp = attn_metadata.num_dycp_reqs
+    q_start_loc = attn_metadata.query_start_loc
+    dycp_token_end = int(q_start_loc[n_dycp].item())
+    total_tokens = attn_metadata.num_actual_tokens
+
+    # DyCP metadata
+    dycp_q_start_loc = q_start_loc[:n_dycp + 1]
+    dycp_max_query_len = int(
+        (dycp_q_start_loc[1:] - dycp_q_start_loc[:-1]).max().item()
+    )
+    dycp_meta = FlashAttentionMetadata(
+        num_actual_tokens=dycp_token_end,
+        max_query_len=dycp_max_query_len,
+        query_start_loc=dycp_q_start_loc,
+        max_seq_len=attn_metadata.max_seq_len,
+        seq_lens=attn_metadata.seq_lens[:n_dycp],
+        block_table=attn_metadata.block_table[:n_dycp],
+        slot_mapping=attn_metadata.slot_mapping[:dycp_token_end],
+        use_cascade=False,
+        common_prefix_len=0,
+        cu_prefix_query_lens=None,
+        prefix_kv_lens=None,
+        suffix_kv_lens=None,
+        num_decodes=0,
+        num_prefills=n_dycp,
+        num_decode_tokens=0,
+        num_prefill_tokens=dycp_token_end,
+        num_dycp_reqs=n_dycp,
+        num_dycp_tokens=attn_metadata.num_dycp_tokens,
+        dycp_prefill_q_head_indices=attn_metadata.dycp_prefill_q_head_indices,
+        dycp_prefill_q_tail_indices=attn_metadata.dycp_prefill_q_tail_indices,
+        dycp_prefill_kv_head_indices=attn_metadata.dycp_prefill_kv_head_indices,
+        dycp_prefill_kv_tail_indices=attn_metadata.dycp_prefill_kv_tail_indices,
+        dycp_prefill_output_restore_idx=attn_metadata.dycp_prefill_output_restore_idx,
+        dycp_prefill_context_kv_lens=attn_metadata.dycp_prefill_context_kv_lens,
+        max_dycp_prefill_context_kv_len=attn_metadata.max_dycp_prefill_context_kv_len,
+        pcp_allgather_restore_idx=attn_metadata.pcp_allgather_restore_idx,
+        causal=attn_metadata.causal,
+    )
+
+    # DP metadata
+    dp_q_start_loc_raw = q_start_loc[n_dycp:]
+    dp_q_start_loc = dp_q_start_loc_raw - dp_q_start_loc_raw[0]
+    dp_token_num = total_tokens - dycp_token_end
+    dp_num_reqs = dp_q_start_loc.shape[0] - 1
+    dp_max_query_len = int(
+        (dp_q_start_loc[1:] - dp_q_start_loc[:-1]).max().item()
+    ) if dp_num_reqs > 0 else 0
+    dp_max_seq_len = int(
+        attn_metadata.seq_lens[n_dycp:].max().item()
+    ) if dp_num_reqs > 0 else 0
+
+    dp_meta = FlashAttentionMetadata(
+        num_actual_tokens=dp_token_num,
+        max_query_len=dp_max_query_len,
+        query_start_loc=dp_q_start_loc,
+        max_seq_len=dp_max_seq_len,
+        seq_lens=attn_metadata.seq_lens[n_dycp:],
+        block_table=attn_metadata.block_table[n_dycp:],
+        slot_mapping=attn_metadata.slot_mapping[dycp_token_end:],
+        use_cascade=False,
+        common_prefix_len=0,
+        cu_prefix_query_lens=None,
+        prefix_kv_lens=None,
+        suffix_kv_lens=None,
+        scheduler_metadata=attn_metadata.scheduler_metadata,
+        max_num_splits=attn_metadata.max_num_splits,
+        num_decodes=0,
+        num_prefills=dp_num_reqs,
+        num_decode_tokens=0,
+        num_prefill_tokens=dp_token_num,
+        num_dycp_reqs=0,
+        causal=attn_metadata.causal,
+    )
+
+    return dycp_meta, dp_meta
 
 
 class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetadata]):
@@ -410,6 +513,15 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         use_cascade = common_prefix_len > 0
         max_dcp_context_kv_len = 0
         dcp_context_kv_lens = None
+        num_dycp_tokens = 0
+        pcp_allgather_restore_idx = None
+        dycp_prefill_q_head_indices = None
+        dycp_prefill_q_tail_indices = None
+        dycp_prefill_kv_head_indices = None
+        dycp_prefill_kv_tail_indices = None
+        dycp_prefill_output_restore_idx = None
+        dycp_prefill_context_kv_lens = None
+        max_dycp_prefill_context_kv_len = 0
 
         cu_prefix_query_lens = None
         prefix_kv_lens = None
@@ -451,6 +563,10 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             )
         elif self.dycp_world_size > 1:
             num_dycp_reqs = common_attn_metadata.num_dycp_reqs
+            num_dycp_tokens = common_attn_metadata.num_dycp_tokens
+            pcp_allgather_restore_idx = common_attn_metadata.pcp_allgather_restore_idx
+
+            # Adjust DyCP request seq_lens to local KV cache sizes
             seq_lens[:num_dycp_reqs] = get_cp_local_seq_lens(
                 seq_lens[:num_dycp_reqs],
                 self.dycp_world_size,
@@ -458,7 +574,64 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 self.cp_kv_cache_interleave_size,
             )
             max_seq_len = seq_lens.max().item()
-            
+
+            # Compute DyCP prefill DualChunkSwap metadata
+            dycp_prefill_q_head_indices = None
+            dycp_prefill_q_tail_indices = None
+            dycp_prefill_kv_head_indices = None
+            dycp_prefill_kv_tail_indices = None
+            dycp_prefill_output_restore_idx = None
+            dycp_prefill_context_kv_lens = None
+            max_dycp_prefill_context_kv_len = 0
+
+            if num_prefills > 0 and num_dycp_reqs > 0:
+                # Query start loc for DyCP requests only (CPU for index computation)
+                query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+                cp_query_start_loc_cpu = query_start_loc_cpu[:num_dycp_reqs + 1]
+
+                # DualChunkSwap indices for new-token attention
+                q_head_idx, q_tail_idx = get_pcp_query_indices(
+                    cp_query_start_loc_cpu
+                )
+                output_res_idx = torch.cat([q_head_idx, q_tail_idx]).argsort()
+                kv_start_loc_cpu = cp_query_start_loc_cpu * self.dycp_world_size
+                kv_head_idx, kv_tail_idx = get_pcp_kv_indices(
+                    kv_start_loc_cpu,
+                    self.dycp_rank,
+                    self.dycp_world_size,
+                )
+
+                dycp_prefill_q_head_indices = q_head_idx.to(
+                    self.device, dtype=torch.int32, non_blocking=True
+                )
+                dycp_prefill_q_tail_indices = q_tail_idx.to(
+                    self.device, dtype=torch.int32, non_blocking=True
+                )
+                dycp_prefill_kv_head_indices = kv_head_idx.to(
+                    self.device, dtype=torch.int32, non_blocking=True
+                )
+                dycp_prefill_kv_tail_indices = kv_tail_idx.to(
+                    self.device, dtype=torch.int32, non_blocking=True
+                )
+                dycp_prefill_output_restore_idx = output_res_idx.to(
+                    self.device, dtype=torch.int32, non_blocking=True
+                )
+
+                # Context KV lens: local_seq_lens - query_lens per DyCP request
+                query_kv_lens = (
+                    query_start_loc[1:num_dycp_reqs + 1]
+                    - query_start_loc[:num_dycp_reqs]
+                )
+                dycp_prefill_context_kv_lens = (
+                    seq_lens[:num_dycp_reqs] - query_kv_lens
+                )
+                dycp_prefill_context_kv_lens = torch.clamp(
+                    dycp_prefill_context_kv_lens, min=0
+                )
+                max_dycp_prefill_context_kv_len = int(
+                    dycp_prefill_context_kv_lens.max().item()
+                ) if num_dycp_reqs > 0 else 0
+
             scheduler_metadata = schedule(
                 batch_size=num_reqs,
                 cu_query_lens=query_start_loc,
@@ -537,6 +710,15 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             num_decode_tokens=num_decode_tokens,
             num_prefill_tokens=num_prefill_tokens,
             num_dycp_reqs=num_dycp_reqs,
+            num_dycp_tokens=num_dycp_tokens if self.dycp_world_size > 1 else 0,
+            dycp_prefill_q_head_indices=dycp_prefill_q_head_indices if self.dycp_world_size > 1 else None,
+            dycp_prefill_q_tail_indices=dycp_prefill_q_tail_indices if self.dycp_world_size > 1 else None,
+            dycp_prefill_kv_head_indices=dycp_prefill_kv_head_indices if self.dycp_world_size > 1 else None,
+            dycp_prefill_kv_tail_indices=dycp_prefill_kv_tail_indices if self.dycp_world_size > 1 else None,
+            dycp_prefill_output_restore_idx=dycp_prefill_output_restore_idx if self.dycp_world_size > 1 else None,
+            dycp_prefill_context_kv_lens=dycp_prefill_context_kv_lens if self.dycp_world_size > 1 else None,
+            max_dycp_prefill_context_kv_len=max_dycp_prefill_context_kv_len if self.dycp_world_size > 1 else 0,
+            pcp_allgather_restore_idx=pcp_allgather_restore_idx if self.dycp_world_size > 1 else None,
         )
         return attn_metadata
 
@@ -648,7 +830,7 @@ class FlashAttentionImpl(AttentionImpl):
 
         if has_prefill and has_decode:
             raise NotImplementedError(
-                "Prefill and decode are not supported in the dcyp forward pass."
+                "Prefill and decode are not supported in the dycp forward pass."
             )
         
         attn_type = self.attn_type
@@ -714,6 +896,87 @@ class FlashAttentionImpl(AttentionImpl):
             key_cache = key_cache.view(dtype)
             value_cache = value_cache.view(dtype)
 
+        # DyCP prefill path: when we have DyCP prefill requests, use
+        # DualChunkSwap strategy with KV allgather.
+        is_dycp_prefill = (
+            self.dycp_world_size > 1
+            and has_prefill
+            and not has_decode
+            and attn_metadata.num_dycp_reqs > 0
+            and attn_metadata.dycp_prefill_q_head_indices is not None
+        )
+
+        if is_dycp_prefill:
+            descale_shape = (
+                attn_metadata.query_start_loc.shape[0] - 1,
+                self.num_kv_heads,
+            )
+            if attn_metadata.num_dycp_reqs == attn_metadata.num_prefills:
+                # Full DyCP prefill batch
+                self._forward_with_dycp_prefill(
+                    query[:num_actual_tokens],
+                    key[:num_actual_tokens],
+                    value[:num_actual_tokens],
+                    key_cache,
+                    value_cache,
+                    output[:num_actual_tokens],
+                    attn_metadata,
+                    q_descale=layer._q_scale.expand(descale_shape),
+                    k_descale=layer._k_scale.expand(descale_shape),
+                    v_descale=layer._v_scale.expand(descale_shape),
+                )
+            else:
+                # Mixed DyCP + DP prefill batch
+                dycp_meta, dp_meta = split_flash_attn_metadata(attn_metadata)
+                dycp_end = int(
+                    attn_metadata.query_start_loc[
+                        attn_metadata.num_dycp_reqs
+                    ].item()
+                )
+                # Phase A: DyCP requests
+                self._forward_with_dycp_prefill(
+                    query[:dycp_end],
+                    key[:dycp_end],
+                    value[:dycp_end],
+                    key_cache,
+                    value_cache,
+                    output[:dycp_end],
+                    dycp_meta,
+                    q_descale=layer._q_scale.expand(descale_shape),
+                    k_descale=layer._k_scale.expand(descale_shape),
+                    v_descale=layer._v_scale.expand(descale_shape),
+                )
+                # Phase B: DP requests (standard paged attention)
+                dp_descale_shape = (
+                    dp_meta.query_start_loc.shape[0] - 1,
+                    self.num_kv_heads,
+                )
+                output[dycp_end:num_actual_tokens], _ = flash_attn_varlen_func(
+                    q=query[dycp_end:num_actual_tokens],
+                    k=key_cache,
+                    v=value_cache,
+                    out=None,
+                    cu_seqlens_q=dp_meta.query_start_loc,
+                    max_seqlen_q=dp_meta.max_query_len,
+                    seqused_k=dp_meta.seq_lens,
+                    max_seqlen_k=dp_meta.max_seq_len,
+                    softmax_scale=self.scale,
+                    causal=dp_meta.causal,
+                    alibi_slopes=self.alibi_slopes,
+                    window_size=self.sliding_window,
+                    block_table=dp_meta.block_table,
+                    softcap=self.logits_soft_cap,
+                    scheduler_metadata=dp_meta.scheduler_metadata,
+                    fa_version=self.vllm_flash_attn_version,
+                    q_descale=layer._q_scale.expand(dp_descale_shape),
+                    k_descale=layer._k_scale.expand(dp_descale_shape),
+                    v_descale=layer._v_scale.expand(dp_descale_shape),
+                    num_splits=dp_meta.max_num_splits,
+                    s_aux=self.sinks,
+                    return_softmax_lse=True,
+                )
+            return output
+
         if not attn_metadata.use_cascade:
             cu_seqlens_q = attn_metadata.query_start_loc
             seqused_k = attn_metadata.seq_lens
@@ -739,9 +1002,7 @@ class FlashAttentionImpl(AttentionImpl):
                 )
                 return output
             else:
-                """
-                dycp can reuse this function for decode
-                """
+                # Standard path (also used for DyCP decode)
                 output[:num_actual_tokens], temp_lse = flash_attn_varlen_func(
                     q=query[:num_actual_tokens],
                     k=key_cache,
@@ -885,6 +1146,227 @@ class FlashAttentionImpl(AttentionImpl):
             query_attn_out,
             query_lse,
         )
+
+    def _forward_with_dycp_prefill(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        output: torch.Tensor,
+        attn_metadata: FlashAttentionMetadata,
+        q_descale: torch.Tensor | None = None,
+        k_descale: torch.Tensor | None = None,
+        v_descale: torch.Tensor | None = None,
+    ) -> None:
+        """Forward pass for DyCP prefill using DualChunkSwap strategy.
+
+        Handles:
+        1. All-gather new-token K/V across DyCP ranks
+        2. DualChunkSwap attention on new tokens (causal, dense)
+        3. Context attention on local KV cache (non-causal, paged)
+        4. LSE-aware all-reduce of context attention across DyCP ranks
+        5. Merge new-token and context attention outputs
+        """
+        num_dycp_tokens = attn_metadata.num_dycp_tokens
+        num_dycp_reqs = attn_metadata.num_dycp_reqs
+
+        # --- Phase A: All-gather new-token K/V across DyCP ranks ---
+        assert attn_metadata.pcp_allgather_restore_idx is not None
+        gathered_key, gathered_value = pcp_kv_allgather_and_restore(
+            key[:num_dycp_tokens],
+            value[:num_dycp_tokens],
+            num_dycp_tokens,
+            attn_metadata.pcp_allgather_restore_idx,
+            get_dycp_group(),
+        )
+
+        # --- Phase B: New-token attention with DualChunkSwap ---
+        assert attn_metadata.dycp_prefill_q_head_indices is not None
+        assert attn_metadata.dycp_prefill_q_tail_indices is not None
+        assert attn_metadata.dycp_prefill_kv_head_indices is not None
+        assert attn_metadata.dycp_prefill_kv_tail_indices is not None
+        assert attn_metadata.dycp_prefill_output_restore_idx is not None
+
+        q_dycp = query[:num_dycp_tokens]
+        q_start_loc = attn_metadata.query_start_loc
+
+        # Per-request query lengths for DyCP requests
+        q_seq_lens = (
+            q_start_loc[1:num_dycp_reqs + 1] - q_start_loc[:num_dycp_reqs]
+        )
+        q_head_seq_lens = torch.div(q_seq_lens, 2, rounding_mode="floor")
+        q_tail_seq_lens = q_seq_lens - q_head_seq_lens
+
+        # Per-request gathered KV lengths for head/tail
+        kv_head_seq_lens = torch.div(
+            q_seq_lens * (self.dycp_rank + 1), 2, rounding_mode="floor"
+        )
+        kv_tail_seq_lens = torch.div(
+            q_seq_lens * (self.dycp_world_size * 2 - self.dycp_rank),
+            2,
+            rounding_mode="floor",
+        )
+
+        def _build_cu_seq_lens(seq_lens: torch.Tensor) -> torch.Tensor:
+            cu = torch.empty(
+                (seq_lens.numel() + 1,),
+                dtype=q_start_loc.dtype,
+                device=q_start_loc.device,
+            )
+            cu[0] = 0
+            torch.cumsum(seq_lens, dim=0, out=cu[1:])
+            return cu
+
+        def _max_len(seq_lens: torch.Tensor) -> int:
+            return int(seq_lens.max().item()) if seq_lens.numel() > 0 else 0
+
+        def _safe_index(
+            indices: torch.Tensor, upper_bound: int
+        ) -> torch.Tensor:
+            if indices.numel() == 0 or upper_bound <= 0:
+                return torch.empty(
+                    (0,), device=query.device, dtype=torch.int64
+                )
+            idx = indices.to(
+                device=query.device, dtype=torch.int64, non_blocking=True
+            )
+            return torch.clamp(idx, 0, upper_bound - 1).contiguous()
+
+        q_cu_head = _build_cu_seq_lens(q_head_seq_lens)
+        q_cu_tail = _build_cu_seq_lens(q_tail_seq_lens)
+        kv_cu_head = _build_cu_seq_lens(kv_head_seq_lens)
+        kv_cu_tail = _build_cu_seq_lens(kv_tail_seq_lens)
+
+        q_head_indices = _safe_index(
+            attn_metadata.dycp_prefill_q_head_indices, q_dycp.shape[0]
+        )
+        q_tail_indices = _safe_index(
+            attn_metadata.dycp_prefill_q_tail_indices, q_dycp.shape[0]
+        )
+        kv_head_indices = _safe_index(
+            attn_metadata.dycp_prefill_kv_head_indices,
+            gathered_key.shape[0],
+        )
+        kv_tail_indices = _safe_index(
+            attn_metadata.dycp_prefill_kv_tail_indices,
+            gathered_key.shape[0],
+        )
+        output_restore_idx = _safe_index(
+            attn_metadata.dycp_prefill_output_restore_idx,
+            num_dycp_tokens,
+        )
+
+        def _run_dual_chunk_attn(
+            q_idx: torch.Tensor,
+            kv_idx: torch.Tensor,
+            cu_q: torch.Tensor,
+            cu_k: torch.Tensor,
+            max_q: int,
+            max_k: int,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            if int(cu_q[-1].item()) == 0:
+                return (
+                    q_dycp.new_empty((0, self.num_heads, self.head_size)),
+                    torch.empty(
+                        (self.num_heads, 0),
+                        device=query.device,
+                        dtype=torch.float32,
+                    ),
+                )
+            chunk_out, chunk_lse = flash_attn_varlen_func(
+                q=torch.index_select(q_dycp, 0, q_idx),
+                k=torch.index_select(gathered_key, 0, kv_idx),
+                v=torch.index_select(gathered_value, 0, kv_idx),
+                cu_seqlens_q=cu_q,
+                cu_seqlens_k=cu_k,
+                max_seqlen_q=max_q,
+                max_seqlen_k=max_k,
+                softmax_scale=self.scale,
+                causal=True,
+                alibi_slopes=self.alibi_slopes,
+                window_size=self.sliding_window,
+                softcap=self.logits_soft_cap,
+                return_softmax_lse=True,
+                fa_version=self.vllm_flash_attn_version,
+                q_descale=q_descale,
+                k_descale=k_descale,
+                v_descale=v_descale,
+            )
+            return chunk_out, chunk_lse
+
+        # Run head and tail attention
+        head_output, head_lse = _run_dual_chunk_attn(
+            q_head_indices, kv_head_indices,
+            q_cu_head, kv_cu_head,
+            _max_len(q_head_seq_lens), _max_len(kv_head_seq_lens),
+        )
+        tail_output, tail_lse = _run_dual_chunk_attn(
+            q_tail_indices, kv_tail_indices,
+            q_cu_tail, kv_cu_tail,
+            _max_len(q_tail_seq_lens), _max_len(kv_tail_seq_lens),
+        )
+
+        # Concatenate and restore original order
+        new_token_output = torch.cat([head_output, tail_output], dim=0)
+        new_token_lse = torch.cat([head_lse, tail_lse], dim=-1)
+        new_token_output = torch.index_select(
+            new_token_output, 0, output_restore_idx
+        )
+        new_token_lse = torch.index_select(
+            new_token_lse, -1, output_restore_idx
+        )
+
+        # --- Phase C: Context attention (if cached context exists) ---
+        has_context = attn_metadata.max_dycp_prefill_context_kv_len > 0
+
+        if has_context:
+            assert attn_metadata.dycp_prefill_context_kv_lens is not None
+            # Paged attention against local KV cache for context tokens
+            context_output, context_lse = flash_attn_varlen_func(
+                q=q_dycp,
+                k=key_cache,
+                v=value_cache,
+                cu_seqlens_q=q_start_loc[:num_dycp_reqs + 1],
+                seqused_k=attn_metadata.dycp_prefill_context_kv_lens,
+                max_seqlen_q=attn_metadata.max_query_len,
+                max_seqlen_k=attn_metadata.max_dycp_prefill_context_kv_len,
+                softmax_scale=self.scale,
+                causal=False,
+                alibi_slopes=self.alibi_slopes,
+                window_size=self.sliding_window,
+                block_table=attn_metadata.block_table[:num_dycp_reqs],
+                softcap=self.logits_soft_cap,
+                return_softmax_lse=True,
+                fa_version=self.vllm_flash_attn_version,
+                q_descale=q_descale,
+                k_descale=k_descale,
+                v_descale=v_descale,
+            )
+
+            # LSE-aware all-reduce across DyCP ranks
+            # FA returns LSE in [H, B], cp_lse_ag_out_ar expects [B, H]
+            context_output, context_lse = cp_lse_ag_out_ar(
+                context_output,
+                context_lse.transpose(0, 1),
+                get_dycp_group(),
+                return_lse=True,
+            )
+            # Back to [H, B] for merge_attn_states
+            context_lse = context_lse.transpose(0, 1).contiguous()
+
+            # Merge context (prefix) and new-token (suffix) outputs
+            merge_attn_states(
+                output[:num_dycp_tokens],
+                context_output,
+                context_lse,
+                new_token_output,
+                new_token_lse,
+            )
+        else:
+            # No context, just use new-token output
+            output[:num_dycp_tokens].copy_(new_token_output)
 
     def _forward_encoder_attention(
         self,
