@@ -1,0 +1,5 @@
+我保留的 blocker 是这 3 类：
+
+[P1] flashinfer.py (line 920) prefill_use_trtllm 仍可能为真，直接绕开 DyCP prefill 实现，走普通 TRTLLM paged prefill。这和 PD 分离无关，即使是 pure prefill batch 也会出错。
+[P1] flashinfer.py (line 1077) context wrapper 还是按完整 local seq_len 在 plan，而不是按 context_kv_lens。如果 PD prefill 里存在 chunked prefill / 已有 context，这会把当前 chunk 也当成 context 算进去。
+[P1] flash_attn.py (line 1322) 和 flashinfer.py (line 1879) 的 context collective 分支仍是 rank-local 判定。只要某些 rank 的 local context 为 0、另一些不为 0，就会出现只有部分 rank 进入 cp_lse_ag_out_ar 的死锁风险。
