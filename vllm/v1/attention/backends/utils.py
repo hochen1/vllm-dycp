@@ -98,6 +98,10 @@ class CommonAttentionMetadata:
     Sequence lengths of the local rank in (decode & prefill) context parallelism world
     """
 
+    # Backward-compatibility aliases.
+    dcp_local_seq_lens: torch.Tensor | None = None
+    dcp_local_seq_lens_cpu: torch.Tensor | None = None
+
     pcp_allgather_restore_idx: torch.Tensor | None = None
     """ Indices to restore the original order of KV in prefill context parallelism """
 
@@ -110,7 +114,8 @@ class CommonAttentionMetadata:
     """Sequence lengths of the local rank in dynamic decode context parallelism world"""
 
     num_dycp_reqs: int = 0
-    
+    num_dycp_tokens: int = 0
+
     @property
     @deprecated(
         """
@@ -128,7 +133,7 @@ class CommonAttentionMetadata:
     @deprecated(
         """
     Prefer using device seq_lens directly to avoid implicit H<>D sync which breaks full
-    async scheduling. If a CPU copy is needed, it can be derived from 
+    async scheduling. If a CPU copy is needed, it can be derived from
     query_start_loc_cpu and seq_lens.
     Will be removed in a future release (v0.14.0)
     """
@@ -169,6 +174,13 @@ class CommonAttentionMetadata:
             encoder_seq_lens_cpu=maybe_slice_reqs(self.encoder_seq_lens_cpu),
             cp_local_seq_lens=maybe_slice_reqs(self.cp_local_seq_lens),
             cp_local_seq_lens_cpu=maybe_slice_reqs(self.cp_local_seq_lens_cpu),
+            dcp_local_seq_lens=maybe_slice_reqs(self.dcp_local_seq_lens),
+            dcp_local_seq_lens_cpu=maybe_slice_reqs(self.dcp_local_seq_lens_cpu),
+            dycp_local_seq_lens=maybe_slice_reqs(self.dycp_local_seq_lens),
+            dycp_local_seq_lens_cpu=maybe_slice_reqs(self.dycp_local_seq_lens_cpu),
+            pcp_allgather_restore_idx=self.pcp_allgather_restore_idx,
+            num_dycp_reqs=self.num_dycp_reqs,
+            num_dycp_tokens=self.num_dycp_tokens,
         )
 
 
@@ -1224,6 +1236,21 @@ def get_cp_local_seq_lens(
     return cp_local_seq_lens.squeeze(1)
 
 
+def get_dcp_local_seq_lens(
+    seq_lens: torch.Tensor,
+    dcp_size: int = 1,
+    dcp_rank: int | None = None,
+    cp_kv_cache_interleave_size: int = 1,
+) -> torch.Tensor:
+    # Kept for backward compatibility.
+    return get_cp_local_seq_lens(
+        seq_lens=seq_lens,
+        cp_world_size=dcp_size,
+        cp_rank=dcp_rank,
+        cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
+    )
+
+
 def pcp_kv_allgather_and_restore(
     key: torch.Tensor,
     value: torch.Tensor,
@@ -1253,8 +1280,31 @@ def pcp_kv_allgather_and_restore(
     )
     # Reorder kv after pcp allgather.
     # Note that there are duplicate decoding tokens after allgather.
-    key = torch.index_select(key_across_cp, 0, pcp_allgather_restore_idx)
-    value = torch.index_select(value_across_cp, 0, pcp_allgather_restore_idx)
+    expected_tokens = int(key_across_cp.shape[0])
+    if expected_tokens == 0:
+        return key_across_cp, value_across_cp
+
+    restore_idx = pcp_allgather_restore_idx.to(
+        device=key_across_cp.device, dtype=torch.int64, non_blocking=True
+    )
+
+    # Keep restore index length aligned with gathered token count to avoid
+    # stale-buffer shape mismatch across dynamic prefill batches.
+    if restore_idx.numel() > expected_tokens:
+        restore_idx = restore_idx[:expected_tokens]
+    elif restore_idx.numel() < expected_tokens:
+        pad_start = int(restore_idx.numel())
+        pad = torch.arange(
+            pad_start,
+            expected_tokens,
+            device=restore_idx.device,
+            dtype=restore_idx.dtype,
+        )
+        restore_idx = torch.cat([restore_idx, pad], dim=0)
+
+    restore_idx = torch.clamp(restore_idx, 0, expected_tokens - 1).contiguous()
+    key = torch.index_select(key_across_cp, 0, restore_idx)
+    value = torch.index_select(value_across_cp, 0, restore_idx)
     return key, value
 
 
@@ -1297,12 +1347,29 @@ def get_pcp_part_indices(
 
 
 def get_pcp_query_indices(cu_num_tokens: torch.Tensor):
-    head_indices, tail_indices = get_pcp_part_indices(
-        cu_num_tokens,
-        1,
-        2,
-        return_head=True,
-        return_tail=True,
+    # For odd sequence lengths, splitting both head/tail as floor(len/2)
+    # would drop one token in total. Keep all tokens by assigning:
+    #   head_len = floor(len/2), tail_len = len - head_len.
+    cu_num_tokens_np = np.asarray(cu_num_tokens)
+    starts = cu_num_tokens_np[:-1]
+    ends = cu_num_tokens_np[1:]
+    seq_lens = ends - starts
+    head_lens = seq_lens // 2
+    tail_lens = seq_lens - head_lens
+
+    head_parts = []
+    tail_parts = []
+    for start, end, head_len, tail_len in zip(starts, ends, head_lens, tail_lens):
+        if head_len > 0:
+            head_parts.append(np.arange(start, start + head_len, dtype=np.int64))
+        if tail_len > 0:
+            tail_parts.append(np.arange(end - tail_len, end, dtype=np.int64))
+
+    head_indices = (
+        np.concatenate(head_parts) if head_parts else np.array([], dtype=np.int64)
+    )
+    tail_indices = (
+        np.concatenate(tail_parts) if tail_parts else np.array([], dtype=np.int64)
     )
     return torch.from_numpy(head_indices), torch.from_numpy(tail_indices)
 
@@ -1326,6 +1393,9 @@ def get_pcp_kv_indices(
     )
     return torch.from_numpy(kv_head_indices), torch.from_numpy(kv_tail_indices)
 
+
+
+
 def reorder_batch_to_split_cp_and_normal(
     input_batch: "InputBatch",
     scheduler_output: "SchedulerOutput",
@@ -1333,10 +1403,8 @@ def reorder_batch_to_split_cp_and_normal(
     """Move CP-flagged requests to the front of the batch.
        Expected order: [cp, cp, ncp, ncp], all cp is ahead of ncp
     """
-
     req_ids = input_batch.req_ids
     num_reqs = len(req_ids)
-
     # 1. Mark which requests are CP（cp_rank_scheduled_tokens[rid] > 1）
     is_cp = np.array(
         [scheduler_output.cp_rank_scheduled_tokens[rid] > 1 for rid in req_ids],
@@ -1344,42 +1412,31 @@ def reorder_batch_to_split_cp_and_normal(
     )
 
     # 2. Original order: cp = 0, ncp = 1
-    # [0, 1, 0, 1] (0 = cp, 1 = ncp)
-    req_regions = np.zeros(is_cp.shape, dtype=np.int32)  # 0 = decode by default
+    req_regions = np.zeros(is_cp.shape, dtype=np.int32)
     req_regions[~is_cp] = 1
 
     # 3. Calculate target positions: first CP, then non-CP
     num_cps = int(is_cp.sum())
-    # [0, 0, 1, 1] (0 = cp, 1 = ncp)
     target_regions = np.zeros(num_reqs, dtype=np.int32)
-    target_regions[num_cps :] = 1
+    target_regions[num_cps:] = 1
 
-    # [false, true, true, false] (true represents the need to swap)
     needs_swap = req_regions != target_regions
 
     if not needs_swap.any():
         return False
-    
+
     # Extract indices that need swapping and sort by target region
-    # [1, 2]
     orig_indices = np.where(needs_swap)[0]
-    # [1, 0] ---> [1, 0]
     sorted_order = np.argsort(req_regions[needs_swap], kind="stable")
-    # [2, 1]
     src_indices = orig_indices[sorted_order]
-    # {2:1, 1:2}
     src_dest_map = {int(src): int(dst) for src, dst in zip(src_indices, orig_indices)}
 
-    # 4. Swap by cycles, and mark as done to avoid deadlocks
-    # Iterate key
+    # Swap by cycles, and mark as done to avoid deadlocks
     for src in src_dest_map:
         dst = src_dest_map[src]
-        # Swap alone the chain.
         while src != dst:
             input_batch.swap_states(src, dst)
-            # Mark dst as done by updating its destination to itself
             next_dst = src_dest_map.get(dst, dst)
             src_dest_map[dst] = dst
             dst = next_dst
-
     return True
