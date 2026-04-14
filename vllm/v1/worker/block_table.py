@@ -98,10 +98,19 @@ class BlockTable:
             self.dycp_world_size = get_dycp_group().world_size
             self.dycp_rank = get_dycp_group().rank_in_group
         except AssertionError:
-            # DCP might not be initialized in testing
+            # DyCP might not be initialized in testing
             self.dycp_world_size = 1
             self.dycp_rank = 0
-        
+
+        self.total_cp_world_size = (
+            self.pcp_world_size * self.dcp_world_size * self.dycp_world_size
+        )
+        self.total_cp_rank = (
+            (self.dycp_rank * self.pcp_world_size + self.pcp_rank)
+            * self.dcp_world_size
+            + self.dcp_rank
+        )
+
         self.cp_kv_cache_interleave_size = cp_kv_cache_interleave_size
 
     def append_row(
@@ -146,8 +155,8 @@ class BlockTable:
         # NOTE(woosuk): We can't simply use `token_indices // block_size`
         # here because M (max_model_len) is not necessarily divisible by
         # block_size.
-        total_cp_world_size = self.pcp_world_size * self.dcp_world_size
-        total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
+        total_cp_world_size = self.total_cp_world_size
+        total_cp_rank = self.total_cp_rank
         if total_cp_world_size > 1:
             # Note(hc): The DCP implement store kvcache with an interleave
             # style, the kvcache for the token whose token_idx is i is
@@ -203,19 +212,19 @@ class BlockTable:
         # req_indices >= num_dycp_reqs: use dp calculation
         num_tokens = req_indices.shape[0]
         dycp_mask = req_indices < num_dycp_reqs
-        
-        total_cp_world_size = self.dycp_world_size
-        total_cp_rank = self.dycp_rank
-        
+
+        total_cp_world_size = self.total_cp_world_size
+        total_cp_rank = self.total_cp_rank
+
         # Initialize output array
         slot_mapping_result = np.zeros(num_tokens, dtype=np.int64)
-        
+
         # Process dycp requests (dcp calculation)
         if np.any(dycp_mask):
             dycp_indices = np.where(dycp_mask)[0]
             dycp_req_indices = req_indices[dycp_mask]
             dycp_positions = positions[dycp_mask]
-            
+
             if total_cp_world_size > 1:
                 # Use DCP calculation for dycp requests
                 virtual_block_size = self.block_size * total_cp_world_size
@@ -223,7 +232,7 @@ class BlockTable:
                     dycp_req_indices * self.max_num_blocks_per_req
                     + dycp_positions // virtual_block_size
                 )
-                
+
                 block_numbers = self.block_table.np.ravel()[block_table_indices]
                 virtual_block_offsets = dycp_positions % virtual_block_size
                 mask = (
@@ -240,21 +249,23 @@ class BlockTable:
                 )
                 slot_mapping = block_numbers * self.block_size + block_offsets
                 slot_mapping_result[dycp_indices] = np.where(mask, slot_mapping, -1)
-        
+
         # Process dp requests (simple calculation)
         if np.any(~dycp_mask):
             dp_indices = np.where(~dycp_mask)[0]
             dp_req_indices = req_indices[~dycp_mask]
             dp_positions = positions[~dycp_mask]
-            
+
             # Use DP calculation (total_cp_world_size == 1 case)
             block_table_indices = (
-                dp_req_indices * self.max_num_blocks_per_req + dp_positions // self.block_size
+                dp_req_indices * self.max_num_blocks_per_req
+                + dp_positions // self.block_size
             )
             block_numbers = self.block_table.np.ravel()[block_table_indices]
             block_offsets = dp_positions % self.block_size
-            slot_mapping_result[dp_indices] = block_numbers * self.block_size + block_offsets
-        
+            slot_mapping_result[dp_indices] = (
+                block_numbers * self.block_size + block_offsets
+            )
         # Write final slots
         self.slot_mapping.np[:num_tokens] = slot_mapping_result
 
@@ -347,6 +358,11 @@ class MultiGroupBlockTable:
         except AssertionError:
             # DCP might not be initialized in testing
             dcp_world_size = 1
+        try:
+            dycp_world_size = get_dycp_group().world_size
+        except AssertionError:
+            # DyCP might not be initialized in testing
+            dycp_world_size = 1
 
         if len(kernel_block_sizes) != len(block_sizes):
             raise ValueError(
@@ -354,7 +370,7 @@ class MultiGroupBlockTable:
                 f"must match block_sizes length ({len(block_sizes)})"
             )
 
-        total_cp_world_size = dcp_world_size * pcp_world_size
+        total_cp_world_size = dcp_world_size * pcp_world_size * dycp_world_size
 
         self.block_tables = [
             BlockTable(

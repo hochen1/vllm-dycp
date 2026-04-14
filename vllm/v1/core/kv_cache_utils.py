@@ -24,6 +24,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
+    get_cp_kv_cache_world_size,
 )
 from vllm.v1.request import Request
 from vllm.v1.utils import tensor_data
@@ -1276,16 +1277,19 @@ def _report_kv_cache_config(
         // len(kv_cache_config.kv_cache_groups)
         * min_block_size
     )
-    dcp_size = vllm_config.parallel_config.decode_context_parallel_size
-    pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
-    if pcp_size * dcp_size > 1:
-        num_tokens *= pcp_size * dcp_size
+    dcp_size = max(vllm_config.parallel_config.decode_context_parallel_size, 1)
+    pcp_size = max(vllm_config.parallel_config.prefill_context_parallel_size, 1)
+    dycp_size = max(vllm_config.parallel_config.dp_per_domain, 1)
+    cp_world_size = get_cp_kv_cache_world_size(vllm_config)
+    if cp_world_size > 1:
+        num_tokens *= cp_world_size
         logger.info(
             "Multiplying the GPU KV cache size by the cp_world_size %d "
-            "(pcp_world_size %d * dcp_world_size %d).",
-            pcp_size * dcp_size,
+            "(pcp_world_size %d * dcp_world_size %d * dycp_world_size %d).",
+            cp_world_size,
             pcp_size,
             dcp_size,
+            dycp_size,
         )
     num_tokens_str = f"{num_tokens:,}"
     logger.info_once("GPU KV cache size: %s tokens", num_tokens_str, scope="local")

@@ -6,8 +6,8 @@ import torch
 import numpy as np
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.v1.utils import CpuGpuBuffer
-from vllm.distributed.parallel_state import get_pcp_group
-
+from vllm.distributed.parallel_state import get_pcp_group, get_dycp_group
+from vllm.logger import logger
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 else:
@@ -29,12 +29,18 @@ class PCPManager:
         max_num_reqs: int,
         device: torch.device,
         pin_memory: bool = False,
+        max_pre_division_tokens: int | None = None,
     ) -> None:
         self.pcp_world_size = pcp_world_size
         self.pcp_rank = pcp_rank
+        self.device = device
+
+        # Pre-division buffers may need to be larger than post-division
+        # buffers when DyCP schedules multiple CP requests per round.
+        pre_div_size = max_pre_division_tokens or max_buffer_num_tokens
 
         self.pcp_allgather_restore_idx = CpuGpuBuffer(
-            max_buffer_num_tokens,
+            pre_div_size,
             dtype=torch.int64,
             device=device,
             pin_memory=pin_memory,
@@ -49,7 +55,7 @@ class PCPManager:
         )
         self.num_pcp_pads_cpu = self.num_pcp_pads_cpu_tensor.numpy()
         self.pcp_unpad_mask_cpu_tensor = torch.zeros(
-            (max_buffer_num_tokens,),
+            (pre_div_size,),
             device="cpu",
             dtype=torch.bool,
         )
@@ -67,6 +73,8 @@ class PCPManager:
         # np.concatenate([np.arange(n) for n in num_scheduled_tokens])
         """
         # Step 1. [2, 5, 3] -> [2, 7, 10]
+        if len(num_scheduled_tokens) == 0:
+            return np.array([], dtype=cumsum_dtype or np.int64), np.array([], dtype=np.int32)
         cu_num_tokens = np.cumsum(num_scheduled_tokens, dtype=cumsum_dtype)
         total_num_tokens = cu_num_tokens[-1]
         # Step 2. [2, 7, 10] -> [0, 0, 2, 2, 2, 2, 2, 7, 7, 7]
@@ -135,6 +143,8 @@ class PCPManager:
         >>> self.pcp_allgather_resotre_idx
         [0, 9, 1, 2, 10, 11, 12, 13, 3, 4, 5, 6, 14, 15, 16, 17, 7, 8]
         """
+        if num_reqs == 0 or len(num_scheduled_tokens) == 0:
+            return np.array([], dtype=np.int32), np.array([], dtype=np.int32)
 
         assert reorder_batch_threshold is not None, (
             "PCP depends on reorder batch to split decode and prefill requests."
@@ -157,7 +167,7 @@ class PCPManager:
         # Record how many pads were added per request (padded - original).
         self.num_pcp_pads_cpu[:num_reqs] = (
             num_padded_scheduled_tokens - num_scheduled_tokens
-        )
+        )[:num_reqs]
 
         # cu_padded_tokens: cumulative sum of padded token counts,
         # pcp_padded_arange: per-request arange flattened for padded tokens.
@@ -229,6 +239,24 @@ class PCPManager:
                 num_scheduled_tokens[:num_decode_reqs], arange_np
             )[1]
 
+        # For padded PCP tokens, keep positions within each request's real
+        # token range to avoid downstream RoPE/index gather OOB.
+        valid_pos_upper = np.repeat(
+            np.maximum(num_scheduled_tokens - 1, 0),
+            pcp_tokens,
+        )
+        if valid_pos_upper.shape[0] == positions.shape[0]:
+            num_clipped = int(np.count_nonzero(positions > valid_pos_upper))
+            np.minimum(positions, valid_pos_upper, out=positions)
+            if num_clipped > 0:
+                logger.debug(
+                    "pcp clamp padded positions clipped=%d "
+                    "num_reqs=%d world=%d",
+                    num_clipped,
+                    int(num_reqs),
+                    int(self.pcp_world_size),
+                )
+
         # Build the restore index used after allgather.
         padded_pos_start_loc = np.roll(cu_padded_tokens, 1)
         padded_pos_start_loc[0] = 0
@@ -246,10 +274,14 @@ class PCPManager:
             pcp_tokens[:num_reqs],
             positions,
         )
+
     def get_logits_indices(self, cu_num_tokens: np.ndarray, num_reqs: int):
+        if num_reqs == 0 or len(cu_num_tokens) == 0:
+            return torch.empty((0,), dtype=torch.int64, device=self.device)
+        num_pads = self.num_pcp_pads_cpu_tensor[:num_reqs].to(self.device)
         return (
-            torch.from_numpy(cu_num_tokens) * self.pcp_world_size
-            - self.num_pcp_pads_cpu_tensor[:num_reqs]
+            torch.from_numpy(cu_num_tokens).to(self.device) * self.pcp_world_size
+            - num_pads
             - 1
         )
 
@@ -260,6 +292,8 @@ class PCPManager:
         num_reqs: int,
         num_tokens_np: np.ndarray,
     ):
+        if num_reqs == 0 or len(num_scheduled_tokens) == 0:
+            return np.array([], dtype=bool)
         return (
             num_computed_tokens_cpu[:num_reqs]
             + num_scheduled_tokens * self.pcp_world_size
@@ -269,26 +303,123 @@ class PCPManager:
     def get_padded_slot_mapping(self, num_tokens: int, slot_mapping: torch.Tensor):
         # After pcp allgather and restore, there are padded tokens in kv,
         # so we need pad slotmapping for alignment.
+        if num_tokens == 0:
+            return self.pcp_padded_slot_mapping[:0]
         pcp_padded_slot_mapping = self.pcp_padded_slot_mapping[
             : num_tokens * self.pcp_world_size
         ]
         cp_unpad_mask = self.pcp_unpad_mask_cpu_tensor[
             : num_tokens * self.pcp_world_size
-        ]
+        ].to(self.device, non_blocking=True)
+        num_unpadded = int(cp_unpad_mask.sum().item())
+        slot_numel = int(slot_mapping.shape[0])
+        logger.debug(
+            "get_padded_slot_mapping num_tokens=%d world=%d "
+            "target=%d num_unpadded=%d slot_numel=%d",
+            num_tokens,
+            self.pcp_world_size,
+            int(cp_unpad_mask.numel()),
+            num_unpadded,
+            slot_numel,
+        )
         pcp_padded_slot_mapping.fill_(-1)
-        pcp_padded_slot_mapping[cp_unpad_mask] = slot_mapping
+        if slot_numel == int(cp_unpad_mask.numel()):
+            # slot_mapping already follows gathered+padded shape.
+            pcp_padded_slot_mapping[cp_unpad_mask] = slot_mapping[cp_unpad_mask]
+        elif slot_numel == num_unpadded:
+            # slot_mapping is compacted (unpadded) representation.
+            pcp_padded_slot_mapping[cp_unpad_mask] = slot_mapping
+        else:
+            # Fallback: keep process alive and emit enough info for diagnosis.
+            fill_count = min(num_unpadded, slot_numel)
+            logger.debug(
+                "get_padded_slot_mapping mismatch, fill_count=%d "
+                "(num_unpadded=%d, slot_numel=%d)",
+                fill_count,
+                num_unpadded,
+                slot_numel,
+            )
+            if fill_count > 0:
+                valid_idx = torch.nonzero(cp_unpad_mask, as_tuple=False).squeeze(1)
+                pcp_padded_slot_mapping[valid_idx[:fill_count]] = slot_mapping[
+                    :fill_count
+                ]
         return pcp_padded_slot_mapping
+
+    def get_restore_slot_mapping(
+        self,
+        slot_mapping: torch.Tensor,
+        num_tokens_unpadded: int,
+    ) -> torch.Tensor:
+        if num_tokens_unpadded == 0:
+            return slot_mapping[:0]
+        slot_mapping = get_pcp_group().all_gather(
+            slot_mapping[:num_tokens_unpadded],
+            0,
+        )
+        restore_idx = self.pcp_allgather_restore_idx.gpu[: slot_mapping.shape[0]]
+        if slot_mapping.shape[0] > 0:
+            restore_idx = torch.clamp(restore_idx, 0, slot_mapping.shape[0] - 1)
+        return torch.index_select(
+            slot_mapping,
+            0,
+            restore_idx,
+        )
+
+    def get_dycp_restore_slot_mapping(
+        self,
+        slot_mapping: torch.Tensor,
+        num_tokens_unpadded: int,
+    ) -> torch.Tensor:
+        if num_tokens_unpadded == 0:
+            return slot_mapping[:0]
+        slot_mapping = get_dycp_group().all_gather(
+            slot_mapping[:num_tokens_unpadded],
+            0,
+        )
+        restore_idx = self.pcp_allgather_restore_idx.gpu[: slot_mapping.shape[0]]
+        if slot_mapping.shape[0] > 0:
+            restore_idx = torch.clamp(restore_idx, 0, slot_mapping.shape[0] - 1)
+        return torch.index_select(
+            slot_mapping,
+            0,
+            restore_idx,
+        )
 
     def get_restore_hidden_states(
         self, hidden_states: torch.Tensor, num_tokens_unpadded: int
     ):
         # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx
         # ignores the padding from CUDA Graph.
+        if num_tokens_unpadded == 0:
+            return hidden_states[:0]
         hidden_states = get_pcp_group().all_gather(
             hidden_states[:num_tokens_unpadded],
             0,
         )
         restore_idx = self.pcp_allgather_restore_idx.gpu[: hidden_states.shape[0]]
+        if hidden_states.shape[0] > 0:
+            restore_idx = torch.clamp(restore_idx, 0, hidden_states.shape[0] - 1)
+        return torch.index_select(
+            hidden_states,
+            0,
+            restore_idx,
+        )
+
+    def get_dycp_restore_hidden_states(
+        self, hidden_states: torch.Tensor, num_tokens_unpadded: int
+    ):
+        # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx
+        # ignores the padding from CUDA Graph.
+        if num_tokens_unpadded == 0:
+            return hidden_states[:0]
+        hidden_states = get_dycp_group().all_gather(
+            hidden_states[:num_tokens_unpadded],
+            0,
+        )
+        restore_idx = self.pcp_allgather_restore_idx.gpu[: hidden_states.shape[0]]
+        if hidden_states.shape[0] > 0:
+            restore_idx = torch.clamp(restore_idx, 0, hidden_states.shape[0] - 1)
         return torch.index_select(
             hidden_states,
             0,

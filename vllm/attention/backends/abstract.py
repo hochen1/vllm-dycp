@@ -320,6 +320,10 @@ class AttentionImpl(ABC, Generic[T]):
     pcp_world_size: int
     pcp_rank: int
 
+    # Backward-compatibility aliases.
+    total_cp_world_size: int
+    total_cp_rank: int
+
     cp_world_size: int
     cp_rank: int
 
@@ -352,9 +356,12 @@ class AttentionImpl(ABC, Generic[T]):
             self.dycp_rank = 0
         self.cp_world_size = self.pcp_world_size * self.dcp_world_size
         self.cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
+        self.total_cp_world_size = self.cp_world_size
+        self.total_cp_rank = self.cp_rank
 
         self.need_to_return_lse_for_decode = (
-            (self.cp_world_size > 1 or self.dycp_world_size > 1 ) and self.can_return_lse_for_decode
+            (self.dcp_world_size > 1 or self.dycp_world_size > 1)
+            and self.can_return_lse_for_decode
         )
         return self
 
