@@ -116,6 +116,9 @@ class CommonAttentionMetadata:
     num_dycp_reqs: int = 0
     num_dycp_tokens: int = 0
 
+    # Scheduler 决定的 batch 类型：True = 纯 prefill batch
+    is_prefill_batch: bool = True
+
     @property
     @deprecated(
         """
@@ -1234,21 +1237,6 @@ def get_cp_local_seq_lens(
     )
     cp_local_seq_lens = base + remainder
     return cp_local_seq_lens.squeeze(1)
-
-
-def get_dcp_local_seq_lens(
-    seq_lens: torch.Tensor,
-    dcp_size: int = 1,
-    dcp_rank: int | None = None,
-    cp_kv_cache_interleave_size: int = 1,
-) -> torch.Tensor:
-    # Kept for backward compatibility.
-    return get_cp_local_seq_lens(
-        seq_lens=seq_lens,
-        cp_world_size=dcp_size,
-        cp_rank=dcp_rank,
-        cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
-    )
 
 
 def pcp_kv_allgather_and_restore(

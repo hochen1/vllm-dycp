@@ -1772,6 +1772,7 @@ class GPUModelRunner(
         cascade_attn_prefix_lens: list[list[int]] | None = None,
         num_dycp_reqs: int = 0,
         num_dycp_tokens: int = 0,
+        is_prefill_batch: bool = True,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
@@ -1889,6 +1890,7 @@ class GPUModelRunner(
             causal=True,
             num_dycp_reqs=num_dycp_reqs,
             num_dycp_tokens=num_dycp_tokens,
+            is_prefill_batch=is_prefill_batch,
         )
         if self.dycp_world_size > 1 and num_dycp_reqs > 0:
             self.cp_local_seq_lens.cpu[:num_dycp_reqs] = get_cp_local_seq_lens(
@@ -3409,6 +3411,7 @@ class GPUModelRunner(
                         cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                         num_dycp_reqs=scheduler_output.num_cp_request,
                         num_dycp_tokens=num_dycp_tokens,
+                        is_prefill_batch=scheduler_output.is_prefill_batch,
                     )
                 )
 
@@ -4516,6 +4519,7 @@ class GPUModelRunner(
                 for_cudagraph_capture=is_graph_capturing,
                 num_dycp_reqs=num_cp_tokens,
                 num_dycp_tokens=0,  # CUDA graph capture uses dummy values
+                is_prefill_batch=not uniform_decode,
             )
 
         with self.maybe_dummy_run_with_lora(

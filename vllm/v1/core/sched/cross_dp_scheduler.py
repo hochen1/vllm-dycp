@@ -177,13 +177,17 @@ class CrossDPScheduler(Scheduler):
         assert self.max_cp_tokens >= self.graph_size_for_cp, "max_cp_tokens should be greater than or equal to graph_size_for_cp"
         # Request queue control the token threshold for long requests.
         self.waiting = LongShortRequestQueue(
-            long_request_threshold=1 * 1024,
+            long_request_threshold=100 * 1024,
             max_long_requests=self.max_cp_tokens,
         )
         self.request_manager = RequestManager(
             cp_world_size=self.cp_world_size,
             max_num_seqs=self.max_num_running_reqs,
         )
+
+        # Prefill/Decode batch 分离控制
+        self._decode_starvation_counter: int = 0
+        self._max_decode_starvation_steps: int = 1
 
     def _update_after_schedule(
         self,
@@ -566,6 +570,35 @@ class CrossDPScheduler(Scheduler):
         # For logging.
         scheduled_timestamp = time.monotonic()
 
+        # --- Prefill/Decode batch 类型判定 ---
+        has_prefill_running = False
+        has_decode_running = False
+        for req in self.running:
+            ntoks = (req.num_tokens_with_spec
+                     + req.num_output_placeholders
+                     - req.num_computed_tokens)
+            if ntoks > 1:
+                has_prefill_running = True
+            elif ntoks == 1:
+                has_decode_running = True
+            if has_prefill_running and has_decode_running:
+                break
+
+        has_prefill_work = has_prefill_running or len(self.waiting) > 0
+
+        if (has_decode_running
+                and self._decode_starvation_counter
+                >= self._max_decode_starvation_steps):
+            is_prefill_batch = False
+            self._decode_starvation_counter = 0
+        elif has_prefill_work:
+            is_prefill_batch = True
+            if has_decode_running:
+                self._decode_starvation_counter += 1
+        else:
+            is_prefill_batch = False
+            self._decode_starvation_counter = 0
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and max(rank_budgets) > 0:
@@ -592,6 +625,14 @@ class CrossDPScheduler(Scheduler):
                 + request.num_output_placeholders
                 - request.num_computed_tokens
             )
+
+            # Prefill/Decode batch 分离：跳过不属于当前 batch 类型的请求
+            if is_prefill_batch and num_new_tokens == 1:
+                req_index += 1
+                continue
+            if not is_prefill_batch and num_new_tokens > 1:
+                req_index += 1
+                continue
 
             """
             TODO(AoChen): Long prefill token threshold is not implemented yet. We temparily ignore this for decode instance.
@@ -690,7 +731,8 @@ class CrossDPScheduler(Scheduler):
         skipped_waiting_requests = create_request_queue(self.policy)
 
         # Next, schedule the WAITING requests.
-        if not any(preempted_reqs):
+        # Decode batch 不引入新请求，跳过 WAITING 循环。
+        if not any(preempted_reqs) and is_prefill_batch:
             while self.waiting and max(rank_budgets) > 0:
                 if len(self.running) == (
                     (self.max_num_running_reqs - self.waiting.running_long_count) * self.cp_world_size + self.waiting.running_long_count
@@ -957,6 +999,20 @@ class CrossDPScheduler(Scheduler):
         )
         assert total_scheduled <= self.max_num_running_reqs * self.cp_world_size
 
+        # Batch 纯度检查：每个 batch 必须是纯 prefill 或纯 decode
+        # for idx in range(self.cp_world_size):
+        #     for req_id, tokens in num_scheduled_tokens[idx].items():
+        #         if is_prefill_batch:
+        #             assert tokens > 1, (
+        #                 f"Prefill batch contains decode request {req_id} "
+        #                 f"with num_scheduled_tokens={tokens} on rank {idx}"
+        #             )
+        #         else:
+        #             assert tokens == 1, (
+        #                 f"Decode batch contains prefill request {req_id} "
+        #                 f"with num_scheduled_tokens={tokens} on rank {idx}"
+        #             )
+
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
         num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
@@ -1022,6 +1078,7 @@ class CrossDPScheduler(Scheduler):
                         cp_rank=idx,
                         cp_rank_scheduled_tokens=cp_rank_scheduled_tokens[idx],
                         num_cp_request=sum([1 if cp_size > 1 else 0 for cp_size in  cp_rank_scheduled_tokens[idx].values()]),
+                        is_prefill_batch=is_prefill_batch,
                         none_tokens_in_peer_sched=none_tokens_in_peer_sched
                     )
                 )

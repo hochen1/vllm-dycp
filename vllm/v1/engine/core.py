@@ -139,16 +139,11 @@ class EngineCore:
                 logger.warning("Disabling chunked prefill for model without KVCache")
                 vllm_config.scheduler_config.enable_chunked_prefill = False
 
-        # NOTE: dp_per_domain (DyCP) is NOT included here.
-        # DyCP uses CrossDPScheduler which manages per-rank block pools
-        # independently with the original spec block_size. Unlike DCP/PCP
-        # where all requests share a uniform "virtual block", DyCP mixes
-        # CP requests (cross-rank) and DP requests (single-rank), so a
-        # single multiplied block_size cannot represent both correctly.
         scheduler_block_size = (
             vllm_config.cache_config.block_size
             * vllm_config.parallel_config.decode_context_parallel_size
             * vllm_config.parallel_config.prefill_context_parallel_size
+            * max(vllm_config.parallel_config.dp_per_domain, 1)
         )
 
         self.scheduler: SchedulerInterface = Scheduler(

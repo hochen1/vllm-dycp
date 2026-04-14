@@ -214,6 +214,9 @@ class SchedulerOutput:
     
     num_cp_request: int = 0
 
+    # True = 本 batch 为纯 prefill batch（scheduler 决定）
+    is_prefill_batch: bool = True
+
     none_tokens_in_peer_sched: bool = False
 
     @classmethod

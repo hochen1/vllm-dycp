@@ -1220,12 +1220,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             )
         )
 
-        # NOTE(chenxiao): In DyCP batches, local query lengths of CP requests may
-        # differ across ranks after CP token partition. Inferring decode/prefill
-        # split from local query lengths can diverge across ranks and deadlock
-        # DyCP collectives. Force a uniform prefill-style metadata split.
-        # if self.dycp_world_size > 1 and num_dycp_reqs > 0 and self.vllm_config.kv_transfer_config.kv_role in ("kv_producer", "kv_both"):
-        if self.dycp_world_size > 1 and num_dycp_reqs > 0:
+        # NOTE(chenxiao): With prefill/decode batch separation, the scheduler
+        # guarantees each batch is pure prefill or pure decode. Use the
+        # scheduler's is_prefill_batch flag instead of inferring from
+        # per-rank query lengths, which can misclassify CP prefill requests
+        # (per-rank query_len == 1 after token partition) as decode.
+        is_prefill_batch = common_attn_metadata.is_prefill_batch
+        if self.dycp_world_size > 1 and num_dycp_reqs > 0 and is_prefill_batch:
             num_decodes = 0
             num_decode_tokens = 0
             num_prefills = num_reqs
@@ -1233,6 +1234,28 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_tokens
+
+        logger.debug(
+            "MLA build: num_reqs=%d, num_prefills=%d, num_decodes=%d, "
+            "num_prefill_tokens=%d, num_decode_tokens=%d, "
+            "is_prefill_batch=%s, num_dycp_reqs=%d",
+            num_reqs, num_prefills, num_decodes,
+            num_prefill_tokens, num_decode_tokens,
+            is_prefill_batch, num_dycp_reqs,
+        )
+
+        # Batch 纯度检查：scheduler 保证每个 batch 是纯 prefill 或纯 decode
+        # if self.dycp_world_size > 1 and num_reqs > 0:
+        #     if is_prefill_batch:
+        #         assert num_decodes == 0, (
+        #             f"Prefill batch has {num_decodes} decode requests "
+        #             f"(num_prefills={num_prefills}, num_dycp_reqs={num_dycp_reqs})"
+        #         )
+        #     else:
+        #         assert num_prefills == 0, (
+        #             f"Decode batch has {num_prefills} prefill requests "
+        #             f"(num_decodes={num_decodes}, num_dycp_reqs={num_dycp_reqs})"
+        #         )
 
         prefill_metadata = None
         dp_prefill_metadata = None  # Set for mixed DyCP+DP batches
