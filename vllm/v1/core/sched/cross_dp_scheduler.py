@@ -97,7 +97,13 @@ class RequestManager:
                 ]
                 if not candidates:
                     return None
-                best_dp = max(candidates, key=lambda i: rank_budgets[i])
+                # Primary key: most remaining token budget.
+                # Secondary key: fewest existing requests (tie-breaker
+                # when budgets are equal, e.g. prefill batch skips
+                # running decode requests so budgets stay identical).
+                best_dp = max(candidates,
+                              key=lambda i: (rank_budgets[i],
+                                             -self.num_req_per_dp[i]))
             else:
                 # Fallback: pick rank with fewest requests.
                 best_dp = min(range(len(self.num_req_per_dp)),
@@ -177,7 +183,7 @@ class CrossDPScheduler(Scheduler):
         assert self.max_cp_tokens >= self.graph_size_for_cp, "max_cp_tokens should be greater than or equal to graph_size_for_cp"
         # Request queue control the token threshold for long requests.
         self.waiting = LongShortRequestQueue(
-            long_request_threshold=100 * 1024,
+        long_request_threshold=128 * 1024,
             max_long_requests=self.max_cp_tokens,
         )
         self.request_manager = RequestManager(
