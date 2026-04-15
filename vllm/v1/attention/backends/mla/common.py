@@ -1225,11 +1225,11 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         # split from local query lengths can diverge across ranks and deadlock
         # DyCP collectives. Force a uniform prefill-style metadata split.
         # if self.dycp_world_size > 1 and num_dycp_reqs > 0 and self.vllm_config.kv_transfer_config.kv_role in ("kv_producer", "kv_both"):
-        if self.dycp_world_size > 1 and num_dycp_reqs > 0:
-            num_decodes = 0
-            num_decode_tokens = 0
-            num_prefills = num_reqs
-            num_prefill_tokens = num_tokens
+        # if self.dycp_world_size > 1 and num_dycp_reqs > 0:
+        #     num_decodes = 0
+        #     num_decode_tokens = 0
+        #     num_prefills = num_reqs
+        #     num_prefill_tokens = num_tokens
 
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_tokens

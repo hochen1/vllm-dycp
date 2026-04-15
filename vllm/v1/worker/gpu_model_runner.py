@@ -1398,6 +1398,7 @@ class GPUModelRunner(
         ]
         """
         num_dycp_reqs = scheduler_output.num_cp_request
+        dycp_has_prefill = False
 
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -1419,12 +1420,18 @@ class GPUModelRunner(
 
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
-        # NOTE: When DyCP has CP requests, pre-division token counts can
-        # overflow the post-division-sized GPU buffers (positions, etc.).
+        # NOTE: When DyCP has CP prefill requests, pre-division token counts
+        # can overflow the post-division-sized GPU buffers (positions, etc.).
         # Skip the initial computation here; the DyCP branch below
         # recomputes everything with post-division values.
-        if not (self.dycp_world_size > 1
-                and scheduler_output.num_cp_request > 0):
+        # For DyCP pure decode (all CP query_len=1), no token splitting
+        # happens, so we can use the standard path directly.
+        _dycp_needs_pcp = (
+            self.dycp_world_size > 1
+            and scheduler_output.num_cp_request > 0
+            and np.any(num_scheduled_tokens[:scheduler_output.num_cp_request] > 1)
+        )
+        if not _dycp_needs_pcp:
             req_indices = np.repeat(
                 self.arange_np[:num_reqs], num_scheduled_tokens)
 
@@ -1477,7 +1484,22 @@ class GPUModelRunner(
         elif self.dycp_world_size > 1:
             total_num_pcp_scheduled_tokens = 0
             num_cp_request = scheduler_output.num_cp_request
-            if num_cp_request > 0:
+            # DyCP pure decode (all CP requests have query_len=1) does not
+            # need PCP token splitting / allgather — skip to avoid overhead.
+            dycp_has_prefill = (
+                num_cp_request > 0
+                and np.any(num_scheduled_tokens[:num_cp_request] > 1)
+            )
+            if num_cp_request > 0 and not dycp_has_prefill:
+                # Keep PCPManager state aligned with the pure-decode fast path.
+                # These requests did not go through update_tokens_for_pcp(), so
+                # stale pad counts from a previous prefill batch would otherwise
+                # leak into later mask/logit calculations.
+                self.pcp_manager.num_pcp_pads_cpu[:num_cp_request] = 0
+            # Default: for pure decode, dycp tokens = num_cp_request
+            # (1 token per CP request, no PCP splitting).
+            num_dycp_tokens = int(sum(num_scheduled_tokens[:num_cp_request])) if num_cp_request > 0 else 0
+            if num_cp_request > 0 and dycp_has_prefill:
                 num_scheduled_tokens[:num_cp_request], pcp_positions = (
                     self.pcp_manager.update_tokens_for_pcp(
                         num_scheduled_tokens[:num_cp_request],
@@ -1639,7 +1661,7 @@ class GPUModelRunner(
                     num_tokens_np=num_tokens_np,
                 )
             )
-        elif self.dycp_world_size > 1 and num_dycp_reqs > 0:
+        elif self.dycp_world_size > 1 and num_dycp_reqs > 0 and dycp_has_prefill:
             self.discard_request_mask.np[:num_dycp_reqs] = (
                 self.pcp_manager.get_discard_request_mask(
                     num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu,
@@ -1693,7 +1715,7 @@ class GPUModelRunner(
                 logits_indices = self.pcp_manager.get_logits_indices(
                     cu_num_tokens, num_reqs
                 )
-            elif self.dycp_world_size > 1 and scheduler_output.num_cp_request > 0:
+            elif self.dycp_world_size > 1 and scheduler_output.num_cp_request > 0 and dycp_has_prefill:
                 num_dycp_tokens = sum(num_scheduled_tokens[:num_dycp_reqs])
                 logits_indices[:num_dycp_reqs] = self.pcp_manager.get_logits_indices(
                     cu_num_tokens[:num_dycp_reqs], num_dycp_reqs
@@ -1849,7 +1871,7 @@ class GPUModelRunner(
                     num_tokens,
                     pcp_gathered_slot_mapping,
                 )
-            elif self.dycp_world_size > 1 and num_dycp_tokens > 0:
+            elif self.dycp_world_size > 1 and num_dycp_tokens > num_dycp_reqs:
                 # Keep DYCP slot mapping local.
                 # KV all-gather is only for attention compute; cache updates
                 # must use local slot indices on each rank.
@@ -1931,7 +1953,11 @@ class GPUModelRunner(
                 ]
 
         elif self.dycp_world_size > 1:
-            if num_dycp_tokens > 0:
+            # pcp_allgather_restore_idx is only needed when PCP token
+            # splitting was used (DyCP prefill). Pure decode has
+            # num_dycp_tokens == num_dycp_reqs (1 token per request).
+            _dycp_has_prefill = num_dycp_tokens > num_dycp_reqs
+            if num_dycp_tokens > 0 and _dycp_has_prefill:
                 dycp_allgather_size = num_dycp_tokens * self.dycp_world_size
                 cm_base.pcp_allgather_restore_idx = self.pcp_manager.pcp_allgather_restore_idx.gpu[
                     :dycp_allgather_size
@@ -3474,19 +3500,25 @@ class GPUModelRunner(
                 scheduler_output.total_num_scheduled_tokens = num_scheduled_tokens
 
             elif self.dycp_world_size > 1 and scheduler_output.num_cp_request > 0:
-                num_cp_request = scheduler_output.num_cp_request
-                # 使用 PCP update 后的 num_scheduled_tokens_np
-                num_dycp_tokens_unpadded = int(num_scheduled_tokens_np[:num_cp_request].sum())
-
-                dycp_hidden_states = hidden_states[:num_dycp_tokens_unpadded]
-                non_dycp_hidden_states = hidden_states[num_dycp_tokens_unpadded:]
-
-                dycp_hidden_states = self.pcp_manager.get_dycp_restore_hidden_states(
-                    dycp_hidden_states, num_dycp_tokens_unpadded,
+                # Only restore hidden states when PCP token splitting was used
+                # (i.e., DyCP prefill). Pure DyCP decode skips PCP processing
+                # entirely, so no allgather/restore is needed.
+                dycp_has_prefill = np.any(
+                    num_scheduled_tokens_np[:scheduler_output.num_cp_request] > 1
                 )
+                if dycp_has_prefill:
+                    num_cp_request = scheduler_output.num_cp_request
+                    num_dycp_tokens_unpadded = int(num_scheduled_tokens_np[:num_cp_request].sum())
 
-                hidden_states = torch.cat([dycp_hidden_states, non_dycp_hidden_states], dim=0)
-                scheduler_output.total_num_scheduled_tokens = num_scheduled_tokens
+                    dycp_hidden_states = hidden_states[:num_dycp_tokens_unpadded]
+                    non_dycp_hidden_states = hidden_states[num_dycp_tokens_unpadded:]
+
+                    dycp_hidden_states = self.pcp_manager.get_dycp_restore_hidden_states(
+                        dycp_hidden_states, num_dycp_tokens_unpadded,
+                    )
+
+                    hidden_states = torch.cat([dycp_hidden_states, non_dycp_hidden_states], dim=0)
+                    scheduler_output.total_num_scheduled_tokens = num_scheduled_tokens
 
             if not self.broadcast_pp_output:
                 # Common case.
