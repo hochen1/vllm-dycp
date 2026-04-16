@@ -6,7 +6,10 @@ from dataclasses import dataclass
 import numpy as np
 import pytest
 
-from vllm.v1.attention.backends.utils import reorder_batch_to_split_decodes_and_prefills
+from vllm.v1.attention.backends.utils import (
+    reorder_batch_to_split_cp_and_normal,
+    reorder_batch_to_split_decodes_and_prefills,
+)
 
 
 class MockInputBatch:
@@ -23,8 +26,9 @@ class MockInputBatch:
 
 
 class MockSchedulerOutput:
-    def __init__(self, num_scheduled_tokens):
+    def __init__(self, num_scheduled_tokens=None, cp_rank_scheduled_tokens=None):
         self.num_scheduled_tokens = num_scheduled_tokens
+        self.cp_rank_scheduled_tokens = cp_rank_scheduled_tokens
 
 
 @dataclass
@@ -123,4 +127,71 @@ def test_reorder_batch_to_split_decodes_and_prefills(test_case: ReorderTestCase)
     )
     assert input_batch.req_ids == expected_req_ids, (
         f"Expected order {expected_req_ids}, got {input_batch.req_ids}"
+    )
+
+
+@dataclass
+class CPReorderTestCase:
+    cp_sizes: list[int]
+    payloads: list[int]
+    expected_order: list[int]
+    expected_modified: bool
+
+
+CP_REORDER_TEST_CASES = {
+    "already_ordered": CPReorderTestCase(
+        cp_sizes=[2, 2, 1, 1],
+        payloads=[10, 20, 30, 40],
+        expected_order=[0, 1, 2, 3],
+        expected_modified=False,
+    ),
+    "stable_partition_interleaved": CPReorderTestCase(
+        cp_sizes=[1, 2, 1, 3, 2, 1],
+        payloads=[10, 20, 30, 40, 50, 60],
+        expected_order=[1, 3, 4, 0, 2, 5],
+        expected_modified=True,
+    ),
+    "cp_and_ncp_relative_order_kept": CPReorderTestCase(
+        cp_sizes=[3, 1, 2, 1, 1, 4, 2],
+        payloads=[101, 102, 103, 104, 105, 106, 107],
+        expected_order=[0, 2, 5, 6, 1, 3, 4],
+        expected_modified=True,
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "test_case", CP_REORDER_TEST_CASES.values(), ids=CP_REORDER_TEST_CASES.keys()
+)
+def test_reorder_batch_to_split_cp_and_normal(test_case: CPReorderTestCase):
+    req_ids = [f"r{i}" for i in range(len(test_case.cp_sizes))]
+    num_computed_tokens = np.array(test_case.payloads, dtype=np.int32)
+    cp_rank_scheduled_tokens = {
+        f"r{i}": cp_size for i, cp_size in enumerate(test_case.cp_sizes)
+    }
+
+    input_batch = MockInputBatch(req_ids, num_computed_tokens)
+    scheduler_output = MockSchedulerOutput(
+        cp_rank_scheduled_tokens=cp_rank_scheduled_tokens
+    )
+
+    modified = reorder_batch_to_split_cp_and_normal(
+        input_batch, scheduler_output
+    )
+
+    expected_req_ids = [f"r{i}" for i in test_case.expected_order]
+    expected_payloads = np.array(
+        [test_case.payloads[i] for i in test_case.expected_order],
+        dtype=np.int32,
+    )
+
+    assert modified == test_case.expected_modified, (
+        f"Expected modified={test_case.expected_modified}, got {modified}"
+    )
+    assert input_batch.req_ids == expected_req_ids, (
+        f"Expected order {expected_req_ids}, got {input_batch.req_ids}"
+    )
+    assert np.array_equal(input_batch.num_computed_tokens_cpu, expected_payloads), (
+        f"Expected payload order {expected_payloads.tolist()}, "
+        f"got {input_batch.num_computed_tokens_cpu.tolist()}"
     )
