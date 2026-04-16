@@ -1422,6 +1422,9 @@ def reorder_batch_to_split_cp_and_normal(
     if target_order == list(range(num_reqs)):
         return False
 
+    if hasattr(input_batch, "apply_permutation"):
+        return input_batch.apply_permutation(target_order)
+
     # Reorder to match target_order using O(num_reqs) metadata and at most
     # one swap per destination position. Each "item" below is the original
     # request index currently sitting at a given position.

@@ -266,12 +266,15 @@ class CrossDPScheduler(Scheduler):
                 continue
             yield request
 
-    def _has_schedulable_phase(self, phase: str) -> bool:
+    def _get_schedulable_running_phase(self) -> str | None:
         for request in self.running:
             if self._get_running_request_new_tokens(request) <= 0:
                 continue
-            if self._get_request_batch_phase(request) == phase:
-                return True
+            return self._get_request_batch_phase(request)
+
+        return None
+
+    def _has_schedulable_waiting_phase(self, phase: str) -> bool:
 
         for request in self._iter_schedulable_waiting_requests():
             if self._get_request_batch_phase(request) == phase:
@@ -280,18 +283,17 @@ class CrossDPScheduler(Scheduler):
         return False
 
     def _select_batch_phase(self) -> str | None:
-        has_decode = self._has_schedulable_phase("decode")
-        has_prefill = self._has_schedulable_phase("prefill")
+        running_phase = self._get_schedulable_running_phase()
+        if running_phase is not None:
+            return running_phase
 
-        if has_decode and has_prefill:
-            return (
-                "prefill"
-                if self._last_batch_phase == "decode"
-                else "decode"
-            )
-        if has_decode:
+        waiting_has_decode = self._has_schedulable_waiting_phase("decode")
+        waiting_has_prefill = self._has_schedulable_waiting_phase("prefill")
+
+        # Waiting-only fallback: prefer decode over prefill to reduce bubbles.
+        if waiting_has_decode:
             return "decode"
-        if has_prefill:
+        if waiting_has_prefill:
             return "prefill"
         return None
 
@@ -673,7 +675,6 @@ class CrossDPScheduler(Scheduler):
         # For logging.
         scheduled_timestamp = time.monotonic()
         batch_phase = self._select_batch_phase()
-
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and max(rank_budgets) > 0:

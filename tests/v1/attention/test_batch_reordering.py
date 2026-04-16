@@ -17,6 +17,13 @@ class MockInputBatch:
         self.req_ids = req_ids
         self.num_computed_tokens_cpu = num_computed_tokens_cpu
 
+    def apply_permutation(self, permutation):
+        self.req_ids[:] = [self.req_ids[i] for i in permutation]
+        self.num_computed_tokens_cpu[:] = self.num_computed_tokens_cpu[
+            permutation
+        ].copy()
+        return True
+
     def swap_states(self, i, j):
         self.req_ids[i], self.req_ids[j] = self.req_ids[j], self.req_ids[i]
         self.num_computed_tokens_cpu[i], self.num_computed_tokens_cpu[j] = (
