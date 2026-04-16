@@ -69,6 +69,22 @@ class RequestManager:
         self.max_num_seqs = max_num_seqs
         self.num_long_req_per_domain = 0
         self.num_req_per_dp = [0] * self.cp_world_size
+        self.short_req_rr_cursor = 0
+
+    def _pick_dp_with_round_robin(self, candidates: list[int]) -> int:
+        """Pick a rank by round-robin to avoid persistent DP0 bias."""
+        candidate_set = set(candidates)
+        for offset in range(self.cp_world_size):
+            rank = (self.short_req_rr_cursor + offset) % self.cp_world_size
+            if rank in candidate_set:
+                self.short_req_rr_cursor = (rank + 1) % self.cp_world_size
+                return rank
+
+        # The loop above should always return, but keep a deterministic
+        # fallback for safety.
+        rank = min(candidates)
+        self.short_req_rr_cursor = (rank + 1) % self.cp_world_size
+        return rank
 
     def select_dp(
         self,
@@ -88,8 +104,10 @@ class RequestManager:
             ]
         else:
             if rank_budgets is not None:
-                # Pick the rank with available seq slot AND most remaining
-                # token budget so that per-rank utilisation stays balanced.
+                # Prefer the rank with the most remaining token budget. When
+                # multiple ranks are tied, break ties by current request load,
+                # then round-robin across the remaining candidates so the
+                # first rank does not keep winning ties.
                 candidates = [
                     i for i in range(self.cp_world_size)
                     if self.num_req_per_dp[i] < self.max_num_seqs
@@ -97,11 +115,27 @@ class RequestManager:
                 ]
                 if not candidates:
                     return None
-                best_dp = max(candidates, key=lambda i: rank_budgets[i])
+                max_budget = max(rank_budgets[i] for i in candidates)
+                budget_candidates = [
+                    i for i in candidates if rank_budgets[i] == max_budget
+                ]
+                min_load = min(self.num_req_per_dp[i] for i in budget_candidates)
+                load_candidates = [
+                    i
+                    for i in budget_candidates
+                    if self.num_req_per_dp[i] == min_load
+                ]
+                best_dp = self._pick_dp_with_round_robin(load_candidates)
             else:
-                # Fallback: pick rank with fewest requests.
-                best_dp = min(range(len(self.num_req_per_dp)),
-                              key=lambda i: self.num_req_per_dp[i])
+                # Fallback: pick among least-loaded ranks with round-robin
+                # tie-breaking.
+                min_load = min(self.num_req_per_dp)
+                load_candidates = [
+                    i
+                    for i in range(len(self.num_req_per_dp))
+                    if self.num_req_per_dp[i] == min_load
+                ]
+                best_dp = self._pick_dp_with_round_robin(load_candidates)
             return [best_dp]
     
     def add_req(self, request: Request) -> None:
@@ -184,6 +218,82 @@ class CrossDPScheduler(Scheduler):
             cp_world_size=self.cp_world_size,
             max_num_seqs=self.max_num_running_reqs,
         )
+        self._last_batch_phase: str | None = None
+
+    def _get_request_batch_phase(self, request: Request) -> str:
+        """Classify request into the scheduler batch phase.
+
+        A request stays in "prefill" until all prompt tokens are computed.
+        This also covers chunked prefill / extend requests. Once prompt
+        processing is complete, subsequent steps are "decode".
+        """
+        return (
+            "decode"
+            if request.num_computed_tokens >= request.num_prompt_tokens
+            else "prefill"
+        )
+
+    def _get_running_request_new_tokens(self, request: Request) -> int:
+        """Return the number of new tokens a running request still needs."""
+        if (
+            request.num_output_placeholders > 0
+            and request.num_computed_tokens + 2 - request.num_output_placeholders
+            >= request.num_prompt_tokens + request.max_tokens
+        ):
+            return 0
+
+        num_new_tokens = (
+            request.num_tokens_with_spec
+            + request.num_output_placeholders
+            - request.num_computed_tokens
+        )
+        num_new_tokens = min(
+            num_new_tokens,
+            self.max_model_len - 1 - request.num_computed_tokens,
+        )
+        return max(num_new_tokens, 0)
+
+    def _iter_schedulable_waiting_requests(self):
+        for request in self.waiting:
+            if (
+                isinstance(self.waiting, LongShortRequestQueue)
+                and self.waiting.is_long_request(request)
+                and (
+                    self.waiting.running_long_count >= self.waiting.max_long_requests
+                    or not self.waiting.has_slot_for_long_request
+                )
+            ):
+                continue
+            yield request
+
+    def _has_schedulable_phase(self, phase: str) -> bool:
+        for request in self.running:
+            if self._get_running_request_new_tokens(request) <= 0:
+                continue
+            if self._get_request_batch_phase(request) == phase:
+                return True
+
+        for request in self._iter_schedulable_waiting_requests():
+            if self._get_request_batch_phase(request) == phase:
+                return True
+
+        return False
+
+    def _select_batch_phase(self) -> str | None:
+        has_decode = self._has_schedulable_phase("decode")
+        has_prefill = self._has_schedulable_phase("prefill")
+
+        if has_decode and has_prefill:
+            return (
+                "prefill"
+                if self._last_batch_phase == "decode"
+                else "decode"
+            )
+        if has_decode:
+            return "decode"
+        if has_prefill:
+            return "prefill"
+        return None
 
     def _update_after_schedule(
         self,
@@ -519,15 +629,12 @@ class CrossDPScheduler(Scheduler):
     
     def schedule(self) -> list[SchedulerOutput]:
         # NOTE(woosuk) on the scheduling algorithm:
-        # There's no "decoding phase" nor "prefill phase" in the scheduler.
-        # Each request just has the num_computed_tokens and
-        # num_tokens_with_spec. num_tokens_with_spec =
-        # len(prompt_token_ids) + len(output_token_ids) + len(spec_token_ids).
-        # At each step, the scheduler tries to assign tokens to the requests
-        # so that each request's num_computed_tokens can catch up its
-        # num_tokens_with_spec. This is general enough to cover
-        # chunked prefills, prefix caching, speculative decoding,
-        # and the "jump decoding" optimization in the future.
+        # Internally requests are still tracked only by token progress
+        # (`num_computed_tokens` vs. `num_tokens_with_spec`), which is general
+        # enough to cover chunked prefills, prefix caching and speculative
+        # decoding. For DyCP mixed deployment, however, we deliberately emit
+        # single-phase batches here: each schedule() call only admits prefill
+        # or decode requests, never both.
 
         scheduled_new_reqs: list[list[Request]] = [[] for _ in range(self.cp_world_size)]
         scheduled_resumed_reqs: list[list[Request]] = [[] for _ in range(self.cp_world_size)]
@@ -565,33 +672,26 @@ class CrossDPScheduler(Scheduler):
 
         # For logging.
         scheduled_timestamp = time.monotonic()
+        batch_phase = self._select_batch_phase()
 
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and max(rank_budgets) > 0:
             request = self.running[req_index]
-                
+
             if (
-                request.num_output_placeholders > 0
-                # This is (num_computed_tokens + 1) - (num_output_placeholders - 1).
-                # Since output placeholders are also included in the computed tokens
-                # count, we subtract (num_output_placeholders - 1) to remove any draft
-                # tokens, so that we can be sure no further steps are needed even if
-                # they are all rejected.
-                and request.num_computed_tokens + 2 - request.num_output_placeholders
-                >= request.num_prompt_tokens + request.max_tokens
+                batch_phase is not None
+                and self._get_request_batch_phase(request) != batch_phase
             ):
-                # Async scheduling: Avoid scheduling an extra step when we are sure that
-                # the previous step has reached request.max_tokens. We don't schedule
-                # partial draft tokens since this prevents uniform decode optimizations.
                 req_index += 1
                 continue
 
-            num_new_tokens = (
-                request.num_tokens_with_spec
-                + request.num_output_placeholders
-                - request.num_computed_tokens
-            )
+            num_new_tokens = self._get_running_request_new_tokens(request)
+            if num_new_tokens == 0:
+                # Async scheduling: Avoid scheduling an extra step when we are
+                # sure the previous step already reached max_tokens.
+                req_index += 1
+                continue
 
             """
             TODO(AoChen): Long prefill token threshold is not implemented yet. We temparily ignore this for decode instance.
@@ -699,6 +799,14 @@ class CrossDPScheduler(Scheduler):
                 request = self.waiting.peek_request()
                 if request is None:
                     break
+
+                if (
+                    batch_phase is not None
+                    and self._get_request_batch_phase(request) != batch_phase
+                ):
+                    request = self.waiting.pop_request()
+                    skipped_waiting_requests.prepend_request(request)
+                    continue
 
                 is_long = self.waiting.is_long_request(request)
                 if len(request.cp_ranks) == 0:
@@ -995,6 +1103,12 @@ class CrossDPScheduler(Scheduler):
         total_scheduler_output = []
 
         none_tokens_in_peer_sched = all([sum(num_scheduled_tokens[idx].values()) == 0 for idx in range(self.cp_world_size)])
+
+        if (
+            batch_phase is not None
+            and any(num_scheduled_tokens[idx] for idx in range(self.cp_world_size))
+        ):
+            self._last_batch_phase = batch_phase
 
         for idx in range(self.cp_world_size):
             
