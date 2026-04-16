@@ -1400,43 +1400,49 @@ def reorder_batch_to_split_cp_and_normal(
     input_batch: "InputBatch",
     scheduler_output: "SchedulerOutput",
 ) -> bool:
-    """Move CP-flagged requests to the front of the batch.
-       Expected order: [cp, cp, ncp, ncp], all cp is ahead of ncp
+    """Move CP requests to the front while preserving in-group order.
+
+    The final order is a stable partition of the current batch:
+    [cp0, cp1, ..., ncp0, ncp1, ...].
     """
     req_ids = input_batch.req_ids
     num_reqs = len(req_ids)
-    # 1. Mark which requests are CP（cp_rank_scheduled_tokens[rid] > 1）
-    is_cp = np.array(
-        [scheduler_output.cp_rank_scheduled_tokens[rid] > 1 for rid in req_ids],
-        dtype=bool,
-    )
+    cp_indices = [
+        idx
+        for idx, req_id in enumerate(req_ids)
+        if scheduler_output.cp_rank_scheduled_tokens[req_id] > 1
+    ]
+    ncp_indices = [
+        idx
+        for idx, req_id in enumerate(req_ids)
+        if scheduler_output.cp_rank_scheduled_tokens[req_id] <= 1
+    ]
+    target_order = cp_indices + ncp_indices
 
-    # 2. Original order: cp = 0, ncp = 1
-    req_regions = np.zeros(is_cp.shape, dtype=np.int32)
-    req_regions[~is_cp] = 1
-
-    # 3. Calculate target positions: first CP, then non-CP
-    num_cps = int(is_cp.sum())
-    target_regions = np.zeros(num_reqs, dtype=np.int32)
-    target_regions[num_cps:] = 1
-
-    needs_swap = req_regions != target_regions
-
-    if not needs_swap.any():
+    if target_order == list(range(num_reqs)):
         return False
 
-    # Extract indices that need swapping and sort by target region
-    orig_indices = np.where(needs_swap)[0]
-    sorted_order = np.argsort(req_regions[needs_swap], kind="stable")
-    src_indices = orig_indices[sorted_order]
-    src_dest_map = {int(src): int(dst) for src, dst in zip(src_indices, orig_indices)}
+    if hasattr(input_batch, "apply_permutation"):
+        return input_batch.apply_permutation(target_order)
 
-    # Swap by cycles, and mark as done to avoid deadlocks
-    for src in src_dest_map:
-        dst = src_dest_map[src]
-        while src != dst:
-            input_batch.swap_states(src, dst)
-            next_dst = src_dest_map.get(dst, dst)
-            src_dest_map[dst] = dst
-            dst = next_dst
+    # Reorder to match target_order using O(num_reqs) metadata and at most
+    # one swap per destination position. Each "item" below is the original
+    # request index currently sitting at a given position.
+    items_at_pos = list(range(num_reqs))
+    pos_of_item = list(range(num_reqs))
+
+    for dst_pos, target_item in enumerate(target_order):
+        src_pos = pos_of_item[target_item]
+        if src_pos == dst_pos:
+            continue
+
+        input_batch.swap_states(dst_pos, src_pos)
+
+        displaced_item = items_at_pos[dst_pos]
+        items_at_pos[dst_pos], items_at_pos[src_pos] = (
+            items_at_pos[src_pos],
+            items_at_pos[dst_pos],
+        )
+        pos_of_item[target_item] = dst_pos
+        pos_of_item[displaced_item] = src_pos
     return True
