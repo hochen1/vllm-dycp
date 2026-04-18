@@ -113,7 +113,11 @@ class AgRsAll2AllManager(All2AllManagerBase):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
+    ):
         """
         Gather hidden_states and router_logits from all dp ranks.
         """
@@ -123,12 +127,43 @@ class AgRsAll2AllManager(All2AllManagerBase):
         assert sizes is not None
 
         dist_group = get_ep_group() if is_sequence_parallel else get_dp_group()
-        assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
-        hidden_states, router_logits = dist_group.all_gatherv(
-            [hidden_states, router_logits],
+        rank_in_group = dist_group.rank_in_group
+        if rank_in_group >= len(sizes):
+            logger.error(
+                "dispatch invalid size index: "
+                "is_sp=%s rank_in_group=%s len(sizes)=%s sizes=%s",
+                is_sequence_parallel,
+                rank_in_group,
+                len(sizes),
+                sizes,
+            )
+        assert rank_in_group < len(sizes)
+        expected_local_tokens = sizes[rank_in_group]
+        if expected_local_tokens != hidden_states.shape[0]:
+            logger.error(
+                "dispatch local size mismatch: "
+                "is_sp=%s rank_in_group=%s expected_local_tokens=%s "
+                "actual_hidden_tokens=%s len(sizes)=%s sizes=%s",
+                is_sequence_parallel,
+                rank_in_group,
+                expected_local_tokens,
+                hidden_states.shape[0],
+                len(sizes),
+                sizes,
+            )
+        assert expected_local_tokens == hidden_states.shape[0]
+
+        tensors_to_gather = [hidden_states, router_logits]
+        if extra_tensors is not None:
+            tensors_to_gather.extend(extra_tensors)
+        gathered = dist_group.all_gatherv(
+            tensors_to_gather,
             dim=0,
             sizes=sizes,
         )
+        hidden_states, router_logits = gathered[0], gathered[1]
+        if extra_tensors is not None:
+            return hidden_states, router_logits, list(gathered[2:])
         return hidden_states, router_logits
 
     def combine(

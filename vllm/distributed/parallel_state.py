@@ -1007,11 +1007,25 @@ class GroupCoordinator:
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
+    ):
         if self.device_communicator is not None:
-            return self.device_communicator.dispatch(
-                hidden_states, router_logits, is_sequence_parallel
-            )
+            if extra_tensors is not None:
+                return self.device_communicator.dispatch(
+                    hidden_states,
+                    router_logits,
+                    is_sequence_parallel,
+                    extra_tensors,
+                )
+            else:
+                return self.device_communicator.dispatch(
+                    hidden_states,
+                    router_logits,
+                    is_sequence_parallel,
+                )
         else:
             return hidden_states, router_logits
 
@@ -1318,7 +1332,20 @@ def initialize_model_parallel(
     if config is not None:
         data_parallel_size = config.parallel_config.data_parallel_size
 
-    # the layout order is: ExternalDP x DP x PP x TP
+    logger.info(
+        "chenxiao--debug init_model_parallel start: "
+        "rank=%s world_size=%s dp=%s pcp=%s pp=%s tp=%s dcp=%s backend=%s",
+        rank,
+        world_size,
+        data_parallel_size,
+        prefill_context_model_parallel_size,
+        pipeline_model_parallel_size,
+        tensor_model_parallel_size,
+        decode_context_model_parallel_size,
+        backend,
+    )
+
+    # the layout order is: ExternalDP x DP x PCP x PP x TP
     # ExternalDP is the data parallel group that is not part of the model,
     # every dp rank can generate independently (in verl integration).
     # DP is the data parallel group that is part of the model,
@@ -1330,8 +1357,8 @@ def initialize_model_parallel(
     all_ranks = torch.arange(world_size).reshape(
         -1,
         data_parallel_size,
-        pipeline_model_parallel_size,
         prefill_context_model_parallel_size,
+        pipeline_model_parallel_size,
         tensor_model_parallel_size,
     )  # noqa
 
@@ -1383,7 +1410,7 @@ def initialize_model_parallel(
     global _PCP
     assert _PCP is None, "prefill context parallel group is already initialized"
     group_ranks = (
-        all_ranks.transpose(3, 4)
+        all_ranks.transpose(2, 4)
         .reshape(-1, prefill_context_model_parallel_size)
         .unbind(0)
     )
@@ -1396,7 +1423,7 @@ def initialize_model_parallel(
     global _PP
     assert _PP is None, "pipeline model parallel group is already initialized"
     group_ranks = (
-        all_ranks.transpose(2, 4).reshape(-1, pipeline_model_parallel_size).unbind(0)
+        all_ranks.transpose(3, 4).reshape(-1, pipeline_model_parallel_size).unbind(0)
     )
     group_ranks = [x.tolist() for x in group_ranks]
     _PP = init_model_parallel_group(
@@ -1414,7 +1441,10 @@ def initialize_model_parallel(
     global _EP
     assert _EP is None, "expert parallel group is already initialized"
     group_ranks = (
-        all_ranks.transpose(1, 2)
+        # Keep EP rank order aligned with MoE flattening:
+        # flatten_tp_rank = dp_rank * (pcp_size * tp_size) + pcp_rank * tp_size + tp_rank
+        # i.e. DP x PCP x TP inside each (ExternalDP, PP) slice.
+        all_ranks.permute(0, 3, 1, 2, 4)
         .reshape(
             -1,
             data_parallel_size

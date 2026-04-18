@@ -195,13 +195,28 @@ class Worker(WorkerBase):
                 if dp_local_rank is None:
                     dp_local_rank = self.parallel_config.data_parallel_rank
 
-                tp_pp_world_size = (
+                tp_pp_pcp_world_size = (
                     self.parallel_config.pipeline_parallel_size
+                    * self.parallel_config.prefill_context_parallel_size
                     * self.parallel_config.tensor_parallel_size
                 )
 
-                # DP_LOCAL_RANK * TP_PP_WORLD_SIZE + TP_LOCAL_RANK
-                self.local_rank += dp_local_rank * tp_pp_world_size
+                # DP_LOCAL_RANK * (TP*PP*PCP)_WORLD_SIZE + LOCAL_RANK_IN_DP
+                old_local_rank = self.local_rank
+                self.local_rank += dp_local_rank * tp_pp_pcp_world_size
+                logger.debug(
+                    "gpu_worker local rank adjusted: "
+                    "global_rank=%s dp_local_rank=%s tp=%s pp=%s pcp=%s "
+                    "tp_pp_pcp_world_size=%s local_rank_before=%s local_rank_after=%s",
+                    self.rank,
+                    dp_local_rank,
+                    self.parallel_config.tensor_parallel_size,
+                    self.parallel_config.pipeline_parallel_size,
+                    self.parallel_config.prefill_context_parallel_size,
+                    tp_pp_pcp_world_size,
+                    old_local_rank,
+                    self.local_rank,
+                )
                 assert self.local_rank < torch.cuda.device_count(), (
                     f"DP adjusted local rank {self.local_rank} is out of bounds. "
                 )
@@ -455,9 +470,11 @@ class Worker(WorkerBase):
                     warmup_sizes.append(compile_range.end)
 
         # We skip EPLB here since we don't want to record dummy metrics
+        pcp_world_size = self.parallel_config.prefill_context_parallel_size
         for size in sorted(warmup_sizes, reverse=True):
-            logger.info("Compile and warming up model for size %d", size)
-            self.model_runner._dummy_run(size, skip_eplb=True, remove_lora=False)
+            actual_size = size // pcp_world_size if pcp_world_size > 1 else size
+            logger.info("Compile and warming up model for size %d (actual %d with pcp_world_size=%d)", size, actual_size, pcp_world_size)
+            self.model_runner._dummy_run(actual_size, skip_eplb=True, remove_lora=False)
         self.model_runner.maybe_remove_all_loras(self.model_runner.lora_config)
 
         # Warmup and tune the kernels used during model execution before
