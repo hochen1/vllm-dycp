@@ -33,6 +33,13 @@ def maybe_transfer_kv_layer(func: Callable) -> Callable:
             f"Function {func.__name__} must have a 'layer_name' parameter"
         ) from e
 
+    # For MLA attention: detect kv_c_normed and k_pe parameters.
+    # These contain the pre-interleave-mask KV needed by PD connectors.
+    _kv_c_normed_idx = (
+        param_names.index("kv_c_normed") if "kv_c_normed" in param_names else -1
+    )
+    _k_pe_idx = param_names.index("k_pe") if "k_pe" in param_names else -1
+
     @wraps(func)
     def wrapper(*args, **kwargs):
         if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
@@ -52,8 +59,16 @@ def maybe_transfer_kv_layer(func: Callable) -> Callable:
         # Execute the function
         result = func(*args, **kwargs)
 
-        # Save KV cache layer on exit
-        connector.save_kv_layer(layer_name, kv_cache, attn_metadata)
+        # Save KV cache layer on exit.
+        # For MLA, pass raw pre-mask KV tensors so connectors can
+        # capture complete KV before interleave mask discards data.
+        extra_kw: dict = {}
+        if _kv_c_normed_idx >= 0 and _kv_c_normed_idx < len(args):
+            extra_kw["_raw_kv_c_normed"] = args[_kv_c_normed_idx]
+        if _k_pe_idx >= 0 and _k_pe_idx < len(args):
+            extra_kw["_raw_k_pe"] = args[_k_pe_idx]
+        connector.save_kv_layer(layer_name, kv_cache, attn_metadata,
+                                **extra_kw)
 
         return result
 

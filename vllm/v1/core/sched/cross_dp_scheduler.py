@@ -1,5 +1,6 @@
 from ast import Set
 import itertools
+import os
 import time
 from collections import defaultdict
 from collections.abc import Iterable
@@ -210,8 +211,11 @@ class CrossDPScheduler(Scheduler):
         self.graph_size_for_cp = self.vllm_config.compilation_config.cudagraph_capture_sizes_for_cp
         assert self.max_cp_tokens >= self.graph_size_for_cp, "max_cp_tokens should be greater than or equal to graph_size_for_cp"
         # Request queue control the token threshold for long requests.
+        _thresh = int(os.environ.get("VLLM_LONG_REQUEST_THRESHOLD",
+                                     128 * 1024))
+        logger.info("CrossDPScheduler: long_request_threshold=%d", _thresh)
         self.waiting = LongShortRequestQueue(
-            long_request_threshold=128,
+            long_request_threshold=_thresh,
             max_long_requests=self.max_cp_tokens,
         )
         self.request_manager = RequestManager(
@@ -296,6 +300,47 @@ class CrossDPScheduler(Scheduler):
         if waiting_has_prefill:
             return "prefill"
         return None
+
+    # ==============================
+    # Local PD Separation: Batch mode determination
+    # ==============================
+
+    @staticmethod
+    def _is_pd_decode_request(request: Request) -> bool:
+        """Check if a request is a PD-separation decode request."""
+        kv_params = request.kv_transfer_params
+        return bool(kv_params and kv_params.get("do_remote_prefill"))
+
+    def _determine_batch_mode(self) -> str:
+        """Determine the current batch mode for Phase 1 PD separation.
+
+        Returns:
+            "prefill" - only schedule prefill requests
+            "decode" - only schedule decode (PD) requests
+            "any" - no PD separation active, schedule normally
+        """
+        # Check running requests for PD separation requests
+        has_running_decode = False
+        has_running_prefill = False
+        for request in self.running:
+            if self._is_pd_decode_request(request):
+                has_running_decode = True
+            else:
+                has_running_prefill = True
+
+        # If there are running requests, maintain their batch type
+        if has_running_decode:
+            return "decode"
+        if has_running_prefill:
+            return "prefill"
+
+        # No running requests: check waiting queue
+        # Prioritize decode requests to avoid starvation
+        for request in self.waiting:
+            if self._is_pd_decode_request(request):
+                return "decode"
+
+        return "prefill"
 
     def _update_after_schedule(
         self,
@@ -700,7 +745,10 @@ class CrossDPScheduler(Scheduler):
 
         # For logging.
         scheduled_timestamp = time.monotonic()
-        batch_phase = self._select_batch_phase()
+
+        # Phase 1 PD separation: determine batch mode
+        batch_mode = self._determine_batch_mode()
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and max(rank_budgets) > 0:
@@ -827,15 +875,24 @@ class CrossDPScheduler(Scheduler):
                 if request is None:
                     break
 
-                if (
-                    batch_phase is not None
-                    and self._get_request_batch_phase(request) != batch_phase
-                ):
-                    request = self.waiting.pop_request()
+                # Phase 1 PD separation: skip requests that don't match
+                # the current batch mode
+                is_pd_decode = self._is_pd_decode_request(request)
+                if batch_mode == "decode" and not is_pd_decode:
+                    self.waiting.pop_request()
+                    skipped_waiting_requests.prepend_request(request)
+                    continue
+                if batch_mode == "prefill" and is_pd_decode:
+                    self.waiting.pop_request()
                     skipped_waiting_requests.prepend_request(request)
                     continue
 
                 is_long = self.waiting.is_long_request(request)
+
+                # PD separation: decode requests always use CP=1
+                if is_pd_decode:
+                    is_long = False
+
                 if len(request.cp_ranks) == 0:
                     selected_dp = self.request_manager.select_dp(
                         request, is_long,

@@ -200,3 +200,8 @@ KVConnectorFactory.register_connector(
     "vllm.distributed.kv_transfer.kv_connector.v1.cross_dp_example_connector",
     "CrossDPExampleConnector",
 )
+KVConnectorFactory.register_connector(
+    "LocalPDConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.local_pd_connector",
+    "LocalPDConnector",
+)
