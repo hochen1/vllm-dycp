@@ -111,6 +111,7 @@ class LocalPDConnectorMetadata(KVConnectorMetadata):
     """Connector metadata passed from scheduler to worker."""
     requests: list[LocalPDReqMeta] = field(default_factory=list)
     cp_rank: int = 0
+    has_store_requests: bool = False
 
     def add_request(
         self,
@@ -133,6 +134,8 @@ class LocalPDConnectorMetadata(KVConnectorMetadata):
                 num_tokens_override=num_tokens_override,
             )
         )
+        if is_store:
+            self.has_store_requests = True
 
 
 # ---------------------------------------------------------------------------
@@ -364,9 +367,13 @@ class LocalPDConnector(KVConnectorBase_V1):
             if ext_tokens <= 0:
                 return 0, False
 
+            import time as _time
+            _now = _time.monotonic() * 1000
+            _gap = _now - meta.get("_finish_time_ms", _now)
             logger.info(
-                "External KV found for prefix=%s: %d tokens (aligned=%d)",
-                prefix, num_prompt_tokens, aligned,
+                "External KV found for prefix=%s: %d tokens "
+                "(aligned=%d, gap_from_prefill=%.1fms)",
+                prefix, num_prompt_tokens, aligned, _gap,
             )
             # Use synchronous mode (False): the scheduler treats these
             # tokens as already computed. The actual KV file loading
@@ -598,7 +605,9 @@ class LocalPDConnector(KVConnectorBase_V1):
             }
 
             # Store in memory (no file I/O)
+            import time as _time
             self._completed_prefills[prefix] = meta
+            meta["_finish_time_ms"] = _time.monotonic() * 1000
             # Clean up prefill tracking (all chunks done)
             self._prefill_requests.pop(request.request_id, None)
 
@@ -666,6 +675,8 @@ class LocalPDConnector(KVConnectorBase_V1):
             prefix = req_meta.pd_request_prefix
 
             # Check GPU buffer first (fast path)
+            import time as _time
+            _load_start = _time.monotonic() * 1000
             kv_buf = self._gpu_kv_buffer.get(prefix)
             if kv_buf is None:
                 logger.error(
@@ -676,8 +687,8 @@ class LocalPDConnector(KVConnectorBase_V1):
             actual_tokens = req_meta.slot_mapping.shape[0]
             logger.info(
                 "Loading KV from GPU buffer for prefix=%s "
-                "(%d layers, %d tokens)",
-                prefix, len(kv_buf), actual_tokens,
+                "(%d layers, %d tokens, load_start=%.1f)",
+                prefix, len(kv_buf), actual_tokens, _load_start,
             )
 
             import time as _time
@@ -744,6 +755,9 @@ class LocalPDConnector(KVConnectorBase_V1):
         """
         metadata = self._get_connector_metadata()
         if not isinstance(metadata, LocalPDConnectorMetadata):
+            return
+        # Fast path: skip entirely if no store requests (decode phase)
+        if not metadata.has_store_requests:
             return
 
         is_mla = isinstance(attn_metadata, MLACommonMetadata)
