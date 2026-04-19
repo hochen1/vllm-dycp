@@ -178,4 +178,35 @@ CP 并行的收益在超长序列上才显著：
 3. **性能优化**: GPU buffer + batch all-gather 将长 prompt 延迟降低 10-14%
 4. **短请求开销**: ~200 tokens 场景下 PD 分离有 ~5% 额外开销，来自 proxy HTTP 往返和 NCCL all-gather
 5. **长序列预期收益**: CP 的 prefill 加速在超长序列 (>32K tokens) 上才显著，此时 prefill 计算量远大于通信开销
-6. **改进方向**: 异步 all-gather + prefill overlap、减少 proxy HTTP 开销、支持 chunked prefill 跨步累积
+6. **改进方向**: 支持 chunked prefill 跨步累积、更大模型 + 更长序列验证
+
+### 优化 3: Proxy Connection Pooling (消除 TCP 建连开销)
+
+**改动**: 复用 aiohttp.ClientSession + TCPConnector，避免每次请求建立新 TCP 连接。
+
+| 指标 | 优化前 | 优化后 | 改善 |
+|------|--------|--------|------|
+| PD overhead | 43ms | **19ms** | **-56%** |
+
+### 优化 4: 移除 Batch 分离 → 失败，已回滚
+
+**尝试**: 移除 prefill/decode batch 分离限制，让 decode 请求与 prefill 混合调度。
+**结果**: NCCL 集合操作死锁（shm_broadcast hang）。CP prefill 的 all-gather 需要所有 rank 参与，但 CP=1 decode 只在单 rank 上运行。
+**结论**: Batch 分离是 NCCL 架构的必要约束，不可移除。
+
+### 最终优化总效果
+
+| Input Tokens | 原始 (File I/O) | 最终 (全部优化) | 总改善 |
+|-------------|-----------------|-----------------|--------|
+| ~200 (c=8) | 825ms | 847ms | -2.6% |
+| ~2000 (c=4) | 674ms | 601ms | **+10.8%** |
+| PD overhead (单请求) | 43ms | **19ms** | **+56%** |
+
+### 剩余不可消除的开销
+
+| 组件 | 耗时 | 原因 |
+|------|------|------|
+| Batch 切换 | ~10ms | NCCL 集合操作要求所有 rank 同步 |
+| Connector (all-gather + inject) | ~10ms | GPU 通信 + scatter |
+| Proxy HTTP | ~0ms | Connection pooling 消除 |
+| **总计** | **~20ms** | |
