@@ -279,6 +279,13 @@ class LocalPDConnector(KVConnectorBase_V1):
                 {} for _ in range(self._cp_world_size)
             ]
             self._prefill_requests: dict[str, dict[str, Any]] = {}
+            # In-memory flags for GPU buffer mode (no file I/O)
+            self._completed_prefills: dict[str, dict[str, Any]] = {}
+
+        if role == KVConnectorRole.WORKER:
+            # GPU memory buffer: {prefix: {layer_name: tensor}}
+            # Keeps all-gathered KV on GPU between prefill and decode.
+            self._gpu_kv_buffer: dict[str, dict[str, torch.Tensor]] = {}
 
         logger.info(
             "LocalPDConnector initialized: storage_path=%s, "
@@ -316,23 +323,27 @@ class LocalPDConnector(KVConnectorBase_V1):
                 )
                 return 0, False
 
-            meta_path = os.path.join(
-                self._storage_path, prefix, "meta.json"
-            )
-            if not os.path.exists(meta_path):
-                logger.debug(
-                    "KV not ready for prefix=%s, will retry", prefix
+            # Check in-memory flag first (GPU buffer mode)
+            meta = self._completed_prefills.get(prefix)
+            if meta is None:
+                # Fallback: check file (for backward compatibility)
+                meta_path = os.path.join(
+                    self._storage_path, prefix, "meta.json"
                 )
-                return None, False
-
-            try:
-                with open(meta_path) as f:
-                    meta = json.load(f)
-            except (json.JSONDecodeError, OSError) as e:
-                logger.warning(
-                    "Failed to read meta.json for prefix=%s: %s", prefix, e
-                )
-                return None, False
+                if not os.path.exists(meta_path):
+                    logger.debug(
+                        "KV not ready for prefix=%s, will retry", prefix
+                    )
+                    return None, False
+                try:
+                    with open(meta_path) as f:
+                        meta = json.load(f)
+                except (json.JSONDecodeError, OSError) as e:
+                    logger.warning(
+                        "Failed to read meta for prefix=%s: %s",
+                        prefix, e,
+                    )
+                    return None, False
 
             if not meta.get("completed"):
                 return None, False
@@ -531,16 +542,12 @@ class LocalPDConnector(KVConnectorBase_V1):
             return False, None
 
         if kv_params.get("do_remote_decode"):
-            # Prefill finished: write meta.json so decode can find KV
+            # Prefill finished: store metadata in memory for decode
             prefix = kv_params.get("pd_request_prefix", "")
             if not _validate_prefix(prefix):
                 logger.error("Invalid prefix in request_finished: %s", prefix)
                 return False, None
 
-            meta_path = os.path.join(
-                self._storage_path, prefix, "meta.json"
-            )
-            # Use actual CP ranks used, not global cp_world_size
             actual_cp_count = len(request.cp_ranks) if request.cp_ranks else 1
             meta = {
                 "completed": True,
@@ -550,20 +557,15 @@ class LocalPDConnector(KVConnectorBase_V1):
                 "pd_request_prefix": prefix,
             }
 
-            try:
-                _atomic_write_json(meta_path, meta)
-            except OSError as e:
-                logger.error(
-                    "Failed to write meta.json for prefix=%s: %s", prefix, e
-                )
-                return False, None
+            # Store in memory (no file I/O)
+            self._completed_prefills[prefix] = meta
 
             logger.info(
-                "Prefill finished for prefix=%s, wrote meta.json "
+                "Prefill finished for prefix=%s "
                 "(num_prompt_tokens=%d, cp_world_size=%d)",
                 prefix,
                 len(request.prompt_token_ids),
-                self._cp_world_size,
+                actual_cp_count,
             )
 
             return_params = {
@@ -574,11 +576,9 @@ class LocalPDConnector(KVConnectorBase_V1):
             return False, return_params
 
         if kv_params.get("do_remote_prefill"):
-            # Decode finished: clean up KV files
+            # Decode finished: clean up in-memory metadata
             prefix = kv_params.get("pd_request_prefix", "")
-            if prefix and _validate_prefix(prefix):
-                self._cleanup_kv_files(prefix)
-            # Also clean up any leaked prefill tracking
+            self._completed_prefills.pop(prefix, None)
             self._prefill_requests.pop(request.request_id, None)
             return False, None
 
@@ -622,27 +622,20 @@ class LocalPDConnector(KVConnectorBase_V1):
                 continue
 
             prefix = req_meta.pd_request_prefix
-            meta_path = os.path.join(
-                self._storage_path, prefix, "meta.json"
-            )
-            try:
-                with open(meta_path) as f:
-                    kv_meta = json.load(f)
-            except (json.JSONDecodeError, OSError) as e:
+
+            # Check GPU buffer first (fast path)
+            kv_buf = self._gpu_kv_buffer.get(prefix)
+            if kv_buf is None:
                 logger.error(
-                    "Failed to read KV meta for prefix=%s: %s", prefix, e
+                    "No GPU KV buffer for prefix=%s", prefix
                 )
                 continue
 
-            cp_world_size = kv_meta["cp_world_size"]
-
+            actual_tokens = req_meta.slot_mapping.shape[0]
             logger.info(
-                "Loading KV for prefix=%s (cp_rank=%d): "
-                "cp_world_size=%d, num_tokens=%d",
-                prefix,
-                metadata.cp_rank,
-                cp_world_size,
-                kv_meta["num_prompt_tokens"],
+                "Loading KV from GPU buffer for prefix=%s "
+                "(%d layers, %d tokens)",
+                prefix, len(kv_buf), actual_tokens,
             )
 
             for layer_name in forward_context.no_compile_layers:
@@ -654,40 +647,11 @@ class LocalPDConnector(KVConnectorBase_V1):
                     forward_context.virtual_engine
                 ]
 
-                # Detect MLA from KV cache shape on first layer
                 if is_mla is None:
                     is_mla = kv_cache_layer.dim() == 3
-                    logger.info(
-                        "Detected %s attention (kv shape=%s)",
-                        "MLA" if is_mla else "standard",
-                        kv_cache_layer.shape,
-                    )
 
-                # Load full KV from rank_0 (saved via all-gather for
-                # multi-CP, or directly for single-CP).
-                # For multi-CP: rank_0 saved full KV (via all-gather).
-                # For single-CP: rank_0 saved its own KV directly.
-                # In both cases, just load from rank_0.
-                num_prompt = kv_meta["num_prompt_tokens"]
-                actual_tokens = req_meta.slot_mapping.shape[0]
-
-                rank0_path = os.path.join(
-                    self._storage_path, prefix, "rank_0",
-                    f"{layer_name}.safetensors",
-                )
-                if not os.path.exists(rank0_path):
-                    logger.error(
-                        "KV file missing: %s", rank0_path
-                    )
-                    continue
-                try:
-                    data = safetensors.torch.load_file(rank0_path)
-                    full_kv = data["kv_cache"].cuda()
-                except (OSError, KeyError) as e:
-                    logger.error(
-                        "Failed to load KV for layer=%s prefix=%s: %s",
-                        layer_name, prefix, e,
-                    )
+                full_kv = kv_buf.get(layer_name)
+                if full_kv is None:
                     continue
 
                 # Trim to actual token count
@@ -699,6 +663,9 @@ class LocalPDConnector(KVConnectorBase_V1):
                 _inject_kv_into_layer(
                     kv_cache_layer, full_kv, req_meta.slot_mapping, is_mla
                 )
+
+            # Free GPU buffer after loading (decode only needs it once)
+            del self._gpu_kv_buffer[prefix]
 
             logger.info("KV loaded for prefix=%s", prefix)
 
@@ -750,25 +717,12 @@ class LocalPDConnector(KVConnectorBase_V1):
                     cp_rank, prefix,
                 )
             else:
-                # Single CP rank: extract from paged buffer directly
+                # Single CP rank: extract from paged buffer, store in GPU buffer
                 sm = req_meta.slot_mapping
                 kv_data = _extract_kv_from_layer(kv_layer, sm, is_mla)
-                rank_dir = os.path.join(
-                    self._storage_path, prefix, f"rank_{cp_rank}"
+                self._gpu_kv_buffer.setdefault(prefix, {})[layer_name] = (
+                    kv_data.detach()
                 )
-                os.makedirs(rank_dir, exist_ok=True)
-                file_path = os.path.join(
-                    rank_dir, f"{layer_name}.safetensors"
-                )
-                try:
-                    safetensors.torch.save_file(
-                        {"kv_cache": kv_data.detach().cpu()}, file_path
-                    )
-                except OSError as e:
-                    logger.error(
-                        "Failed to save KV: cp_rank=%d layer=%s: %s",
-                        cp_rank, layer_name, e,
-                    )
 
     def _save_kv_allgather_raw(
         self,
@@ -827,21 +781,14 @@ class LocalPDConnector(KVConnectorBase_V1):
                 cp_rank, gathered_kv.shape, nonzero,
             )
 
-        # Only rank_0 saves
+        # Only rank_0 stores the complete KV
         if cp_rank != 0:
             return
 
-        rank_dir = os.path.join(self._storage_path, prefix, "rank_0")
-        os.makedirs(rank_dir, exist_ok=True)
-        file_path = os.path.join(rank_dir, f"{layer_name}.safetensors")
-        try:
-            safetensors.torch.save_file(
-                {"kv_cache": gathered_kv.detach().cpu()}, file_path
-            )
-        except OSError as e:
-            logger.error(
-                "Failed to save KV layer=%s: %s", layer_name, e,
-            )
+        # Store in GPU memory buffer (no file I/O)
+        self._gpu_kv_buffer.setdefault(prefix, {})[layer_name] = (
+            gathered_kv.detach()
+        )
 
     def wait_for_save(self):
         return
