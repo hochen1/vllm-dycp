@@ -129,6 +129,15 @@ def _build_decode_request(
         for key, value in prefill_kv_params.items():
             if key not in kv_params:
                 kv_params[key] = value
+
+        # Optimization: use token IDs from prefill to skip re-tokenization.
+        # Store token IDs for endpoint switching in _handle_pd_request.
+        prompt_token_ids = prefill_kv_params.get("prompt_token_ids")
+        if prompt_token_ids:
+            req["_use_token_ids"] = True
+            req["prompt"] = prompt_token_ids
+            req.pop("messages", None)
+
     req["kv_transfer_params"] = kv_params
     return req
 
@@ -261,15 +270,21 @@ async def _handle_pd_request(endpoint: str, request: Request):
     decode_req = _build_decode_request(original_body, prefix, prefill_kv_params)
     is_streaming = original_body.get("stream", False)
 
+    # Use /v1/completions for decode when token IDs available (skip tokenization)
+    decode_endpoint = endpoint
+    if decode_req.pop("_use_token_ids", False):
+        decode_endpoint = "/v1/completions"
+
     logger.info(
-        "Starting decode [%s] streaming=%s", prefix, is_streaming,
+        "Starting decode [%s] endpoint=%s streaming=%s",
+        prefix, decode_endpoint, is_streaming,
     )
 
     async def generate():
         try:
             session = await proxy_config.get_session()
             async for chunk in _stream_decode(
-                session, endpoint, decode_req, decode_request_id,
+                session, decode_endpoint, decode_req, decode_request_id,
             ):
                 yield chunk
         except aiohttp.ClientError as exc:

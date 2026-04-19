@@ -623,6 +623,7 @@ class LocalPDConnector(KVConnectorBase_V1):
                 "pd_request_prefix": prefix,
                 "cp_world_size": actual_cp_count,
                 "num_prompt_tokens": len(request.prompt_token_ids),
+                "prompt_token_ids": list(request.prompt_token_ids),
             }
             return False, return_params
 
