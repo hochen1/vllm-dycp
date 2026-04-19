@@ -286,6 +286,9 @@ class LocalPDConnector(KVConnectorBase_V1):
             # GPU memory buffer: {prefix: {layer_name: tensor}}
             # Keeps all-gathered KV on GPU between prefill and decode.
             self._gpu_kv_buffer: dict[str, dict[str, torch.Tensor]] = {}
+            # Pending local KV to be batch-all-gathered in wait_for_save
+            self._pending_local_kv: dict[str, list[tuple[str, torch.Tensor]]] = {}
+            self._pending_cp_rank: int = 0
 
         logger.info(
             "LocalPDConnector initialized: storage_path=%s, "
@@ -734,64 +737,88 @@ class LocalPDConnector(KVConnectorBase_V1):
         cp_rank: int,
         prefix: str,
     ) -> None:
-        """All-gather pre-mask KV from all CP ranks and save on rank_0.
+        """Buffer pre-mask local KV for batch all-gather in wait_for_save.
 
-        Uses the raw kv_c_normed and k_pe tensors from the attention
-        function arguments — these contain ALL locally-computed KV
-        (before interleave mask discards non-owned positions).
+        Instead of doing NCCL all-gather per layer (27 times),
+        we buffer the local KV and do a single batch all-gather
+        in wait_for_save() after all layers complete.
         """
-        from vllm.distributed.parallel_state import get_dycp_group
-
-        dycp_group = get_dycp_group()
-
-        # Build local KV in paged-buffer format: [N, kv_lora_rank + rope_dim]
         num_actual = getattr(attn_metadata, "num_actual_tokens", num_tokens)
         local_kv = torch.cat([
             raw_kv_c_normed[:num_actual],
             raw_k_pe[:num_actual].squeeze(1),
         ], dim=-1)
 
-        if "layers.0." in layer_name:
-            logger.info(
-                "save_kv_raw cp_rank=%d: local_shape=%s num_actual=%d",
-                cp_rank, local_kv.shape, num_actual,
-            )
-
-        # All-gather across CP ranks.
-        # Each rank contributes num_actual tokens of complete KV.
-        gathered_kv = dycp_group.all_gather(
-            local_kv.contiguous(), dim=0
+        # Buffer for batch processing
+        self._pending_local_kv.setdefault(prefix, []).append(
+            (layer_name, local_kv.detach())
         )
-
-        # Apply DualChunkSwap restore index to recover original order.
+        self._pending_cp_rank = cp_rank
+        # Store restore index (same for all layers, save once)
+        if not hasattr(self, "_pending_restore_idx"):
+            self._pending_restore_idx = None
         restore_idx = getattr(
             attn_metadata, "pcp_allgather_restore_idx", None
         )
-        if restore_idx is not None and restore_idx.shape[0] > 0:
-            total = gathered_kv.shape[0]
-            ri = restore_idx[:total].to(gathered_kv.device)
-            ri = torch.clamp(ri, 0, total - 1)
-            gathered_kv = gathered_kv[ri]
-
-        if "layers.0." in layer_name:
-            norms = torch.norm(gathered_kv, dim=-1)
-            nonzero = int((norms > 1e-6).sum().item())
-            logger.info(
-                "save_kv_raw cp_rank=%d: restored_shape=%s nonzero=%d",
-                cp_rank, gathered_kv.shape, nonzero,
-            )
-
-        # Only rank_0 stores the complete KV
-        if cp_rank != 0:
-            return
-
-        # Store in GPU memory buffer (no file I/O)
-        self._gpu_kv_buffer.setdefault(prefix, {})[layer_name] = (
-            gathered_kv.detach()
-        )
+        if restore_idx is not None:
+            self._pending_restore_idx = restore_idx
 
     def wait_for_save(self):
-        return
+        """Batch all-gather all pending local KV across CP ranks."""
+        if not self._pending_local_kv:
+            return
+
+        from vllm.distributed.parallel_state import get_dycp_group
+        dycp_group = get_dycp_group()
+        cp_rank = self._pending_cp_rank
+        restore_idx = getattr(self, "_pending_restore_idx", None)
+
+        for prefix, layer_kvs in self._pending_local_kv.items():
+            # Concatenate all layers' local KV into one tensor
+            # for a single all-gather call
+            layer_names = [name for name, _ in layer_kvs]
+            local_tensors = [kv for _, kv in layer_kvs]
+            # All same shape [num_actual, kv_dim]
+            stacked = torch.cat(local_tensors, dim=0)  # [num_layers * N, D]
+
+            # Single all-gather for all layers
+            gathered = dycp_group.all_gather(
+                stacked.contiguous(), dim=0
+            )
+
+            # Only rank_0 reconstructs
+            if cp_rank == 0:
+                tokens_per_layer = local_tensors[0].shape[0]
+                num_layers = len(layer_names)
+                W = self._cp_world_size
+
+                # Split gathered back into per-rank, per-layer chunks
+                # gathered shape: [W * num_layers * N, D]
+                # Layout: [rank0_layer0, rank0_layer1, ..., rank0_layerN,
+                #          rank1_layer0, ..., rankW_layerN]
+                for layer_idx, layer_name in enumerate(layer_names):
+                    # Collect this layer's data from each rank
+                    layer_chunks = []
+                    for r in range(W):
+                        start = (r * num_layers + layer_idx) * tokens_per_layer
+                        end = start + tokens_per_layer
+                        layer_chunks.append(gathered[start:end])
+
+                    layer_gathered = torch.cat(layer_chunks, dim=0)
+
+                    # Apply DualChunkSwap restore
+                    if restore_idx is not None and restore_idx.shape[0] > 0:
+                        total = layer_gathered.shape[0]
+                        ri = restore_idx[:total].to(layer_gathered.device)
+                        ri = torch.clamp(ri, 0, total - 1)
+                        layer_gathered = layer_gathered[ri]
+
+                    self._gpu_kv_buffer.setdefault(prefix, {})[layer_name] = (
+                        layer_gathered
+                    )
+
+        self._pending_local_kv.clear()
+        self._pending_restore_idx = None
 
     def get_finished(
         self, finished_req_ids: set[str]
