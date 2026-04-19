@@ -227,6 +227,21 @@ CP 并行的收益在超长序列上才显著：
 - Connector decorator Python overhead (27 层 × ~10μs)
 - 已通过 `has_store_requests` fast-path 优化
 
+### 8K 高并发 Benchmark (c=8, 16 prompts, 8K/200)
+
+| 指标 | PD 无 CP | PD 有 CP | Delta |
+|------|----------|----------|-------|
+| Avg Latency | 3223ms | 3282ms | +1.8% |
+| P50 | 3396ms | 3355ms | **-1.2%** |
+| P99 | 4550ms | 4373ms | **-3.9%** |
+| Prompt tok/s | 3654.6 | 3676.2 | +0.6% |
+| Total tok/s | 3826.0 | 3848.7 | +0.6% |
+
+高并发下 CP 的 P99 改善 3.9%，总吞吐持平略优。
+
+### `--api-server-count` 尝试
+启动 2 个 API server 进程导致 EngineCore crash，与 DyCP domain executor 不兼容。需要进一步调查。
+
 ### 优化 5: Chunked Prefill KV 累积
 
 修复 8K+ token 请求的 chunked prefill KV 保存：
