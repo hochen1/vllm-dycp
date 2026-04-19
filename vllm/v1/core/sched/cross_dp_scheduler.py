@@ -746,7 +746,7 @@ class CrossDPScheduler(Scheduler):
         # For logging.
         scheduled_timestamp = time.monotonic()
 
-        # Phase 1 PD separation: determine batch mode
+        # PD separation: determine batch mode to avoid NCCL deadlock
         batch_mode = self._determine_batch_mode()
 
         # First, schedule the RUNNING requests.
@@ -875,8 +875,10 @@ class CrossDPScheduler(Scheduler):
                 if request is None:
                     break
 
-                # Phase 1 PD separation: skip requests that don't match
-                # the current batch mode
+                # PD separation: batch mode enforcement.
+                # Mixing CP prefill and CP=1 decode in same batch
+                # causes NCCL collective deadlock (some ranks don't
+                # participate in all-gather). Must separate.
                 is_pd_decode = self._is_pd_decode_request(request)
                 if batch_mode == "decode" and not is_pd_decode:
                     self.waiting.pop_request()
@@ -889,7 +891,7 @@ class CrossDPScheduler(Scheduler):
 
                 is_long = self.waiting.is_long_request(request)
 
-                # PD separation: decode requests always use CP=1
+                # PD decode requests always use CP=1
                 if is_pd_decode:
                     is_long = False
 
