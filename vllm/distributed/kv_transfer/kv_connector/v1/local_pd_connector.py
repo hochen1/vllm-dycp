@@ -641,8 +641,12 @@ class LocalPDConnector(KVConnectorBase_V1):
                 prefix, len(kv_buf), actual_tokens,
             )
 
-            for layer_name in forward_context.no_compile_layers:
-                layer = forward_context.no_compile_layers[layer_name]
+            import time as _time
+            _t0 = _time.monotonic()
+
+            sm = req_meta.slot_mapping
+            layers_injected = 0
+            for layer_name, layer in forward_context.no_compile_layers.items():
                 kv_cache_attr = getattr(layer, "kv_cache", None)
                 if kv_cache_attr is None:
                     continue
@@ -657,20 +661,31 @@ class LocalPDConnector(KVConnectorBase_V1):
                 if full_kv is None:
                     continue
 
-                # Trim to actual token count
+                # Inject: scatter KV into paged buffer
                 if is_mla:
-                    full_kv = full_kv[:actual_tokens]
+                    num_pages = kv_cache_layer.shape[0]
+                    page_size = kv_cache_layer.shape[1]
+                    flat = kv_cache_layer.reshape(
+                        num_pages * page_size, -1
+                    )
+                    flat[sm] = full_kv[:actual_tokens]
                 else:
-                    full_kv = full_kv[:, :actual_tokens]
+                    num_pages = kv_cache_layer.shape[1]
+                    page_size = kv_cache_layer.shape[2]
+                    flat = kv_cache_layer.reshape(
+                        2, num_pages * page_size, -1
+                    )
+                    flat[:, sm] = full_kv[:, :actual_tokens]
+                layers_injected += 1
 
-                _inject_kv_into_layer(
-                    kv_cache_layer, full_kv, req_meta.slot_mapping, is_mla
-                )
-
-            # Free GPU buffer after loading (decode only needs it once)
+            # Free GPU buffer
             del self._gpu_kv_buffer[prefix]
 
-            logger.info("KV loaded for prefix=%s", prefix)
+            _elapsed = (_time.monotonic() - _t0) * 1000
+            logger.info(
+                "KV injected for prefix=%s: %d layers in %.1fms",
+                prefix, layers_injected, _elapsed,
+            )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         return
@@ -768,6 +783,9 @@ class LocalPDConnector(KVConnectorBase_V1):
         if not self._pending_local_kv:
             return
 
+        import time as _time
+        _t0 = _time.monotonic()
+
         from vllm.distributed.parallel_state import get_dycp_group
         dycp_group = get_dycp_group()
         cp_rank = self._pending_cp_rank
@@ -819,6 +837,9 @@ class LocalPDConnector(KVConnectorBase_V1):
 
         self._pending_local_kv.clear()
         self._pending_restore_idx = None
+
+        _elapsed = (_time.monotonic() - _t0) * 1000
+        logger.info("wait_for_save: all-gather + restore in %.1fms", _elapsed)
 
     def get_finished(
         self, finished_req_ids: set[str]
