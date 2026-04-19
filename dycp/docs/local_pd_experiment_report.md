@@ -202,11 +202,35 @@ CP 并行的收益在超长序列上才显著：
 | ~2000 (c=4) | 674ms | 601ms | **+10.8%** |
 | PD overhead (单请求) | 43ms | **19ms** | **+56%** |
 
-### 剩余不可消除的开销
+### 8K 场景最终对比 (实测)
 
-| 组件 | 耗时 | 原因 |
-|------|------|------|
-| Batch 切换 | ~10ms | NCCL 集合操作要求所有 rank 同步 |
-| Connector (all-gather + inject) | ~10ms | GPU 通信 + scatter |
-| Proxy HTTP | ~0ms | Connection pooling 消除 |
-| **总计** | **~20ms** | |
+| 指标 | PD 无 CP | PD 有 CP | 改善 |
+|------|----------|----------|------|
+| **TTFT** | **565ms** | **209ms** | **-63%** ✅ |
+| Avg Latency (8K/200) | 2163ms | 2207ms | +2.0% |
+| Total tok/s (c=2) | 1401.7 | 1399.1 | -0.2% |
+| Decode per-tok | 9.91ms | 10.19ms | +2.9% |
+
+### 固定开销分析 (8K)
+
+| 组件 | PD 无 CP | PD 有 CP | 说明 |
+|------|----------|----------|------|
+| KV save | 18ms | 15ms | CP 版本用 all-gather |
+| Proxy+decode | 86ms | 82ms | API 处理 + batch switch |
+| **总固定开销** | **104ms** | **97ms** | **两者相同量级** |
+
+**关键发现**: 固定开销是 PD proxy 架构的固有成本，不是 CP 引入的。主要来自 decode 请求的 API 层处理（tokenize 8K 文本）+ scheduler step 等待。
+
+### Decode per-token 劣化分析
+
+稳态 decode 劣化 +0.29ms/tok (+2.9%)，来源：
+- Connector decorator Python overhead (27 层 × ~10μs)
+- 已通过 `has_store_requests` fast-path 优化
+
+### 优化 5: Chunked Prefill KV 累积
+
+修复 8K+ token 请求的 chunked prefill KV 保存：
+- 检测 running requests 中的 prefill continuation chunks
+- 每个 chunk 累积 KV 到 GPU buffer
+- 单 CP 使用 attn_metadata.slot_mapping (非 pre-computed)
+- 8K 请求从 crash → 正常工作
