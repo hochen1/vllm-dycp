@@ -49,6 +49,16 @@ app = FastAPI(title="DyCP Local PD Proxy")
 class ProxyConfig:
     vllm_url: str = "http://localhost:8000"
     api_key: str | None = None
+    _session: aiohttp.ClientSession | None = None
+
+    async def get_session(self) -> aiohttp.ClientSession:
+        """Reuse a single aiohttp session for connection pooling."""
+        if self._session is None or self._session.closed:
+            conn = aiohttp.TCPConnector(limit=100, keepalive_timeout=30)
+            self._session = aiohttp.ClientSession(
+                timeout=AIOHTTP_TIMEOUT, connector=conn
+            )
+        return self._session
 
 
 proxy_config = ProxyConfig()
@@ -211,10 +221,10 @@ async def _handle_pd_request(endpoint: str, request: Request):
     prefill_req = _build_prefill_request(original_body, prefix)
 
     try:
-        async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
-            prefill_resp = await _do_prefill(
-                session, endpoint, prefill_req, prefill_request_id,
-            )
+        session = await proxy_config.get_session()
+        prefill_resp = await _do_prefill(
+            session, endpoint, prefill_req, prefill_request_id,
+        )
     except aiohttp.ClientResponseError as exc:
         logger.error("Prefill request failed [%s]: %s", prefix, exc.message)
         return JSONResponse(
@@ -257,11 +267,11 @@ async def _handle_pd_request(endpoint: str, request: Request):
 
     async def generate():
         try:
-            async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
-                async for chunk in _stream_decode(
-                    session, endpoint, decode_req, decode_request_id,
-                ):
-                    yield chunk
+            session = await proxy_config.get_session()
+            async for chunk in _stream_decode(
+                session, endpoint, decode_req, decode_request_id,
+            ):
+                yield chunk
         except aiohttp.ClientError as exc:
             logger.error("Decode connection error [%s]: %s", prefix, exc)
             error_payload = json.dumps({
@@ -299,11 +309,11 @@ async def health():
 async def proxy_models():
     """Forward /v1/models to vLLM so clients can discover the served model."""
     try:
-        async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
-            headers = _auth_headers()
-            async with session.get(
-                f"{proxy_config.vllm_url}/v1/models", headers=headers,
-            ) as resp:
+        session = await proxy_config.get_session()
+        headers = _auth_headers()
+        async with session.get(
+            f"{proxy_config.vllm_url}/v1/models", headers=headers,
+        ) as resp:
                 body = await resp.read()
                 return JSONResponse(
                     status_code=resp.status,
