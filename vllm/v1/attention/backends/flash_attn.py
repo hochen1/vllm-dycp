@@ -46,6 +46,7 @@ from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     get_cp_local_seq_lens,
     get_kv_cache_layout,
+    slice_common_attn_metadata,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -212,13 +213,15 @@ class FlashAttentionMetadata:
     prefix_scheduler_metadata: torch.Tensor | None = None
     max_num_splits: int = 0
     # For dycp
-    num_decodes:int = 0
+    num_decodes: int = 0
     num_prefills: int = 0
     num_decode_tokens: int = 0
     num_prefill_tokens: int = 0
     num_dycp_reqs: int = 0
 
     causal: bool = True
+    _dycp_split: "FlashAttentionMetadata | None" = None
+    _dp_split: "FlashAttentionMetadata | None" = None
 
 
 def _get_sliding_window_configs(
@@ -415,13 +418,95 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         prefix_kv_lens = None
         suffix_kv_lens = None
         prefix_scheduler_metadata = None
-        
+
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
                 common_attn_metadata,
                 require_uniform=True,
             )
         )
+        prefill_num_dycp_reqs = max(0, num_dycp_reqs - num_decodes)
+        if (
+            self.dycp_world_size > 1
+            and num_prefills > 0
+            and prefill_num_dycp_reqs > 0
+            and common_prefix_len > 0
+        ):
+            raise NotImplementedError(
+                "GQA DyCP prefill does not support prefix cache yet."
+            )
+
+        is_mixed_dycp_prefill = (
+            self.dycp_world_size > 1
+            and num_decodes == 0
+            and 0 < prefill_num_dycp_reqs < num_prefills
+        )
+        if is_mixed_dycp_prefill:
+            dycp_token_end = int(
+                common_attn_metadata.query_start_loc_cpu[prefill_num_dycp_reqs].item()
+            )
+            dycp_common_attn_metadata = slice_common_attn_metadata(
+                common_attn_metadata,
+                request_slice=slice(0, prefill_num_dycp_reqs),
+                token_slice=slice(0, dycp_token_end),
+                num_dycp_reqs=prefill_num_dycp_reqs,
+                num_dycp_tokens=dycp_token_end,
+            )
+            dp_common_attn_metadata = slice_common_attn_metadata(
+                common_attn_metadata,
+                request_slice=slice(prefill_num_dycp_reqs, num_reqs),
+                token_slice=slice(dycp_token_end, num_actual_tokens),
+                num_dycp_reqs=0,
+                num_dycp_tokens=0,
+            )
+
+            dycp_attn_metadata = self.build(
+                common_prefix_len=0,
+                common_attn_metadata=dycp_common_attn_metadata,
+                fast_build=fast_build,
+            )
+            if dycp_attn_metadata.scheduler_metadata is not None:
+                dycp_attn_metadata.scheduler_metadata = (
+                    dycp_attn_metadata.scheduler_metadata.clone()
+                )
+            dp_attn_metadata = self.build(
+                common_prefix_len=0,
+                common_attn_metadata=dp_common_attn_metadata,
+                fast_build=fast_build,
+            )
+            if dp_attn_metadata.scheduler_metadata is not None:
+                dp_attn_metadata.scheduler_metadata = (
+                    dp_attn_metadata.scheduler_metadata.clone()
+                )
+
+            return FlashAttentionMetadata(
+                num_actual_tokens=num_actual_tokens,
+                max_query_len=max_query_len,
+                query_start_loc=query_start_loc,
+                max_seq_len=max_seq_len,
+                seq_lens=seq_lens,
+                block_table=block_table_tensor,
+                slot_mapping=slot_mapping,
+                use_cascade=False,
+                common_prefix_len=0,
+                cu_prefix_query_lens=None,
+                prefix_kv_lens=None,
+                suffix_kv_lens=None,
+                max_dcp_context_kv_len=None,
+                dcp_context_kv_lens=None,
+                scheduler_metadata=None,
+                prefix_scheduler_metadata=None,
+                max_num_splits=0,
+                causal=causal,
+                num_decodes=num_decodes,
+                num_prefills=num_prefills,
+                num_decode_tokens=num_decode_tokens,
+                num_prefill_tokens=num_prefill_tokens,
+                num_dycp_reqs=num_dycp_reqs,
+                _dycp_split=dycp_attn_metadata,
+                _dp_split=dp_attn_metadata,
+            )
+
         if self.dcp_world_size > 1:
             query_kv_lens = query_start_loc[1:] - query_start_loc[:-1]
             dcp_context_kv_lens = seq_lens - query_kv_lens
@@ -458,7 +543,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 self.cp_kv_cache_interleave_size,
             )
             max_seq_len = seq_lens.max().item()
-            
+
             scheduler_metadata = schedule(
                 batch_size=num_reqs,
                 cu_query_lens=query_start_loc,
@@ -642,6 +727,41 @@ class FlashAttentionImpl(AttentionImpl):
         if attn_metadata is None:
             # Profiling run.
             return output.fill_(0)
+
+        if attn_metadata._dycp_split is not None:
+            dycp_meta = attn_metadata._dycp_split
+            dp_meta = attn_metadata._dp_split
+            assert dp_meta is not None
+
+            dycp_num_tokens = int(dycp_meta.num_actual_tokens)
+            dp_num_tokens = int(dp_meta.num_actual_tokens)
+
+            output[:dycp_num_tokens] = self.forward(
+                layer,
+                query[:dycp_num_tokens],
+                key[:dycp_num_tokens],
+                value[:dycp_num_tokens],
+                kv_cache,
+                dycp_meta,
+                output[:dycp_num_tokens],
+                output_scale,
+                output_block_scale,
+            )
+            if dp_num_tokens > 0:
+                dp_start = dycp_num_tokens
+                dp_end = dp_start + dp_num_tokens
+                output[dp_start:dp_end] = self.forward(
+                    layer,
+                    query[dp_start:dp_end],
+                    key[dp_start:dp_end],
+                    value[dp_start:dp_end],
+                    kv_cache,
+                    dp_meta,
+                    output[dp_start:dp_end],
+                    output_scale,
+                    output_block_scale,
+                )
+            return output
 
         has_decode = attn_metadata.num_decodes > 0
         has_prefill = attn_metadata.num_prefills > 0

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import numpy as np
 import pytest
 import torch
 
@@ -9,6 +10,7 @@ from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm.v1.attention.backends.utils import (
     UBatchSlice,
     _make_metadata_with_slice,
+    slice_common_attn_metadata,
     slice_query_start_locs,
     split_attn_metadata,
     split_decodes_and_prefills,
@@ -127,6 +129,55 @@ def test_make_metadata_with_slice_mixed_batch(mixed_small_metadata):
     assert result.max_query_len == 5
     assert torch.equal(result.query_start_loc, torch.tensor([0, 1, 6]))
     assert torch.equal(result.seq_lens, torch.tensor([40, 48]))
+
+
+def test_slice_common_attn_metadata_preserves_dycp_fields(mixed_small_metadata):
+    mixed_small_metadata.encoder_seq_lens = torch.tensor([3, 4, 5, 6])
+    mixed_small_metadata.encoder_seq_lens_cpu = np.array([3, 4, 5, 6])
+    mixed_small_metadata.cp_local_seq_lens = torch.tensor([16, 20, 48, 56])
+    mixed_small_metadata.cp_local_seq_lens_cpu = torch.tensor([16, 20, 48, 56])
+    mixed_small_metadata.dcp_local_seq_lens = torch.tensor([17, 21, 49, 57])
+    mixed_small_metadata.dcp_local_seq_lens_cpu = torch.tensor([17, 21, 49, 57])
+    mixed_small_metadata.dycp_local_seq_lens = torch.tensor([18, 22, 50, 58])
+    mixed_small_metadata.dycp_local_seq_lens_cpu = torch.tensor([18, 22, 50, 58])
+    mixed_small_metadata.num_dycp_reqs = 2
+    mixed_small_metadata.num_dycp_tokens = 2
+
+    result = slice_common_attn_metadata(
+        mixed_small_metadata,
+        request_slice=slice(0, 2),
+        token_slice=slice(0, 2),
+        num_dycp_reqs=2,
+        num_dycp_tokens=2,
+    )
+
+    assert result.num_reqs == 2
+    assert result.num_actual_tokens == 2
+    assert result.num_dycp_reqs == 2
+    assert result.num_dycp_tokens == 2
+    assert torch.equal(result.cp_local_seq_lens, torch.tensor([16, 20]))
+    assert torch.equal(result.dcp_local_seq_lens, torch.tensor([17, 21]))
+    assert torch.equal(result.dycp_local_seq_lens, torch.tensor([18, 22]))
+    assert np.array_equal(result.encoder_seq_lens_cpu, np.array([3, 4]))
+
+
+def test_slice_common_attn_metadata_clones_seq_lens(mixed_small_metadata):
+    original_seq_lens = mixed_small_metadata.seq_lens.clone()
+    original_seq_lens_cpu = mixed_small_metadata.seq_lens_cpu.clone()
+
+    result = slice_common_attn_metadata(
+        mixed_small_metadata,
+        request_slice=slice(0, 2),
+        token_slice=slice(0, 2),
+        num_dycp_reqs=2,
+        num_dycp_tokens=2,
+    )
+
+    result.seq_lens[0] = 999
+    result.seq_lens_cpu[0] = 888
+
+    assert torch.equal(mixed_small_metadata.seq_lens, original_seq_lens)
+    assert torch.equal(mixed_small_metadata.seq_lens_cpu, original_seq_lens_cpu)
 
 
 def test_split_attn_metadata_decode_batch(large_decode_metadata):

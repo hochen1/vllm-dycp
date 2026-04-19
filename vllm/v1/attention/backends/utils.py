@@ -292,6 +292,68 @@ def _make_metadata_with_slice(
     )
 
 
+def slice_common_attn_metadata(
+    attn_metadata: CommonAttentionMetadata,
+    request_slice: slice,
+    token_slice: slice,
+    *,
+    num_dycp_reqs: int,
+    num_dycp_tokens: int,
+    pcp_allgather_restore_idx: torch.Tensor | None = None,
+) -> CommonAttentionMetadata:
+    """Slice CommonAttentionMetadata while preserving CP/DyCP-specific fields.
+
+    This helper is intended for constructing backend-specific sub-metadata,
+    e.g. splitting a mixed DyCP/DP prefill batch into independent DyCP and DP
+    sub-batches that can each run their own forward path.
+    """
+
+    sliced = _make_metadata_with_slice(
+        UBatchSlice(request_slice=request_slice, token_slice=token_slice),
+        attn_metadata,
+    )
+
+    def _maybe_slice_tensor(x: torch.Tensor | None) -> torch.Tensor | None:
+        if x is None:
+            return None
+        return x[request_slice].clone()
+
+    def _maybe_slice_cpu_array(x: np.ndarray | None) -> np.ndarray | None:
+        if x is None:
+            return None
+        return np.array(x[request_slice], copy=True)
+
+    sliced.seq_lens = sliced.seq_lens.clone()
+    if sliced._seq_lens_cpu is not None:
+        sliced._seq_lens_cpu = sliced._seq_lens_cpu.clone()
+    if sliced._num_computed_tokens_cpu is not None:
+        sliced._num_computed_tokens_cpu = sliced._num_computed_tokens_cpu.clone()
+
+    sliced.causal = attn_metadata.causal
+    sliced.encoder_seq_lens = _maybe_slice_tensor(attn_metadata.encoder_seq_lens)
+    sliced.encoder_seq_lens_cpu = _maybe_slice_cpu_array(
+        attn_metadata.encoder_seq_lens_cpu
+    )
+    sliced.cp_local_seq_lens = _maybe_slice_tensor(attn_metadata.cp_local_seq_lens)
+    sliced.cp_local_seq_lens_cpu = _maybe_slice_tensor(
+        attn_metadata.cp_local_seq_lens_cpu
+    )
+    sliced.dcp_local_seq_lens = _maybe_slice_tensor(attn_metadata.dcp_local_seq_lens)
+    sliced.dcp_local_seq_lens_cpu = _maybe_slice_tensor(
+        attn_metadata.dcp_local_seq_lens_cpu
+    )
+    sliced.dycp_local_seq_lens = _maybe_slice_tensor(
+        attn_metadata.dycp_local_seq_lens
+    )
+    sliced.dycp_local_seq_lens_cpu = _maybe_slice_tensor(
+        attn_metadata.dycp_local_seq_lens_cpu
+    )
+    sliced.pcp_allgather_restore_idx = pcp_allgather_restore_idx
+    sliced.num_dycp_reqs = num_dycp_reqs
+    sliced.num_dycp_tokens = num_dycp_tokens
+    return sliced
+
+
 def split_attn_metadata(
     ubatch_slices: list[UBatchSlice],
     common_attn_metadata: CommonAttentionMetadata,

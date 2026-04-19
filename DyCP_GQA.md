@@ -1,0 +1,7 @@
+## 支持GQA的动态CP prefill
++ 严格参考233e389b00c363db1ac445d2df0c4e5fdf93319c和4d0479178b5e0c03ee0b1fa057ad7f583b42331b这两个commit
++ 考虑支持场景：PD分离和以batch为粒度做PD分开计算的单机部署的prefill，不会出现decode请求
++ 一个batch里面CP请求混合DP请求，CP请求在batch前num dycp req的位置，参考MLA的实现，让CP和DP分别走forward
++ 支持chunk prefill，暂时不考虑支持prefix cache
++ 给出一个严格的设计文档，讲清楚你每次修改是做了什么
++ 保证精度和性能都正确，不要出现feature降级之类的鸵鸟做法

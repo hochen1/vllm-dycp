@@ -56,6 +56,7 @@ from vllm.v1.attention.backends.utils import (
     get_kv_cache_layout,
     get_per_layer_parameters,
     infer_global_hyperparameters,
+    slice_common_attn_metadata,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -416,6 +417,13 @@ class FlashInferMetadata:
     paged_kv_indptr_gpu: torch.Tensor | None = None
 
     num_dycp_reqs: int = 0
+    _paged_kv_indptr_cpu_ref: torch.Tensor | None = None
+    _paged_kv_indptr_gpu_ref: torch.Tensor | None = None
+    _paged_kv_indices_ref: torch.Tensor | None = None
+    _paged_kv_last_page_len_cpu_ref: torch.Tensor | None = None
+    _dycp_split: "FlashInferMetadata | None" = None
+    _dp_split: "FlashInferMetadata | None" = None
+
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     reorder_batch_threshold: int = 1
@@ -673,6 +681,198 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             )
         return self._cascade_wrapper
 
+    def _build_split_prefill_metadata(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+    ) -> FlashInferMetadata:
+        """Build pure-prefill metadata for one side of a mixed DyCP/DP batch.
+
+        Mixed DyCP/DP prefill needs two independent wrapper plans. Reusing the
+        builder's singleton wrapper/buffer state would let the second plan
+        overwrite the first one, so this helper allocates per-sub-batch wrapper
+        state while still sharing the global workspace buffer.
+        """
+
+        num_reqs = common_attn_metadata.num_reqs
+        num_actual_tokens = common_attn_metadata.num_actual_tokens
+        num_dycp_reqs = common_attn_metadata.num_dycp_reqs
+
+        page_size = self.page_size
+        max_q_len = common_attn_metadata.max_query_len
+        max_seq_len = common_attn_metadata.max_seq_len
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu.clone()
+        block_table_tensor = common_attn_metadata.block_table_tensor
+        qo_indptr_cpu = common_attn_metadata.query_start_loc_cpu
+
+        if self.dcp_world_size > 1:
+            raise NotImplementedError(
+                "Mixed DyCP/DP prefill splitting is only supported for DyCP."
+            )
+
+        if self.dycp_world_size > 1 and num_dycp_reqs > 0:
+            seq_lens_cpu[:num_dycp_reqs] = get_cp_local_seq_lens(
+                seq_lens_cpu[:num_dycp_reqs],
+                self.dycp_world_size,
+                self.dycp_rank,
+                self.cp_kv_cache_interleave_size,
+            )
+            max_seq_len = int(seq_lens_cpu.max().item())
+
+        seq_lens = seq_lens_cpu.to(self.device, non_blocking=True)
+        seq_lens_np = seq_lens_cpu.numpy()
+        num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
+
+        pin_memory = is_pin_memory_available()
+        paged_kv_indptr_cpu = torch.zeros(
+            num_reqs + 1, dtype=torch.int32, device="cpu", pin_memory=pin_memory
+        )
+        paged_kv_indptr_np = paged_kv_indptr_cpu.numpy()
+        np.cumsum(num_blocks_np, dtype=np.int32, out=paged_kv_indptr_np[1:])
+        paged_kv_indptr = paged_kv_indptr_cpu.to(self.device, non_blocking=True)
+
+        num_actual_pages = int(paged_kv_indptr_np[num_reqs])
+        paged_kv_indices = torch.empty(
+            num_actual_pages, dtype=torch.int32, device=self.device
+        )
+        _copy_page_indices_kernel[(num_reqs,)](
+            paged_kv_indices,
+            block_table_tensor,
+            block_table_tensor.stride(0),
+            paged_kv_indptr,
+            BLOCK_SIZE=1024,
+        )
+
+        paged_kv_last_page_len_cpu = torch.zeros(
+            num_reqs, dtype=torch.int32, device="cpu", pin_memory=pin_memory
+        )
+        paged_kv_last_page_len_np = paged_kv_last_page_len_cpu.numpy()
+        raw_last_page_len = seq_lens_np % page_size
+        paged_kv_last_page_len_np[:num_reqs] = np.where(
+            (raw_last_page_len == 0) & (seq_lens_np != 0),
+            page_size,
+            raw_last_page_len,
+        )
+
+        q_data_type = self.q_data_type
+        uses_spec_reorder = self.reorder_batch_threshold > 1
+        prefill_use_trtllm = use_trtllm_attention(
+            self.num_qo_heads,
+            self.num_kv_heads,
+            num_actual_tokens,
+            max_seq_len,
+            self.dcp_world_size,
+            self.cache_dtype,
+            q_data_type,
+            is_prefill=True,
+            force_use_trtllm=self.attention_config.use_trtllm_attention,
+            has_sinks=self.has_sinks,
+            has_spec=uses_spec_reorder,
+        )
+
+        if not prefill_use_trtllm:
+            if self.has_sinks:
+                raise NotImplementedError(
+                    "FlashInfer backend currently does not support attention "
+                    "sinks, please use trtllm on blackwell or flash attention "
+                    "on earlier GPUs."
+                )
+            if not self.global_hyperparameters.has_same_window_lefts:
+                raise ValueError(
+                    "Window left is not the same for all layers. "
+                    "One potential fix is to set disable_sliding_window=True"
+                )
+            assert self.global_hyperparameters.has_same_all_params, (
+                "FlashInfer backend currently only supports models in which "
+                "all layers share the same values for the following "
+                "hyperparameters: `window_left`, `logits_soft_cap`, "
+                "`sm_scale`."
+            )
+            q_data_type = self.model_config.dtype
+
+        attn_metadata = FlashInferMetadata(
+            num_actual_tokens=num_actual_tokens,
+            q_data_type=q_data_type,
+            slot_mapping=common_attn_metadata.slot_mapping,
+            max_q_len=max_q_len,
+            max_q_len_prefill=max_q_len,
+            max_seq_len=max_seq_len,
+            seq_lens=seq_lens,
+            block_table_tensor=block_table_tensor,
+            prefill_use_trtllm=prefill_use_trtllm,
+            decode_use_trtllm=False,
+            num_decodes=0,
+            num_decode_tokens=0,
+            num_prefills=num_reqs,
+            num_prefill_tokens=num_actual_tokens,
+            use_cascade=False,
+            num_dycp_reqs=num_dycp_reqs,
+            _paged_kv_indptr_cpu_ref=paged_kv_indptr_cpu,
+            _paged_kv_indptr_gpu_ref=paged_kv_indptr,
+            _paged_kv_indices_ref=paged_kv_indices,
+            _paged_kv_last_page_len_cpu_ref=paged_kv_last_page_len_cpu,
+        )
+
+        if not attn_metadata.prefill_use_trtllm:
+            prefill_wrapper: (
+                BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper
+            )
+            if self.dcp_world_size > 1:
+                prefill_wrapper = BatchDCPPrefillWrapper(
+                    workspace_buffer=self._get_workspace_buffer(),
+                )
+                prefill_wrapper.plan(
+                    qo_indptr_cpu=qo_indptr_cpu,
+                    paged_kv_indptr_cpu=paged_kv_indptr_cpu,
+                    paged_kv_indices=paged_kv_indices,
+                    paged_kv_last_page_len_cpu=paged_kv_last_page_len_cpu,
+                    prefill_start=0,
+                    page_size=self.page_size,
+                    num_qo_heads=self.num_qo_heads,
+                    dcp_world_size=self.dcp_world_size,
+                    num_kv_heads=self.num_kv_heads,
+                    head_dim=self.head_dim,
+                    sm_scale=self.sm_scale,
+                    window_left=self.window_left,
+                    logits_soft_cap=self.logits_soft_cap,
+                    q_data_type=q_data_type,
+                    kv_cache_dtype=self.kv_cache_dtype,
+                    prefill_fixed_split_size=self.prefill_fixed_split_size,
+                    disable_split_kv=self.disable_split_kv,
+                )
+            else:
+                prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                    self._get_workspace_buffer(),
+                    get_kv_cache_layout(),
+                )
+                prefill_wrapper.plan(
+                    qo_indptr_cpu,
+                    paged_kv_indptr_cpu,
+                    paged_kv_indices,
+                    paged_kv_last_page_len_cpu,
+                    self.num_qo_heads,
+                    self.num_kv_heads,
+                    self.head_dim,
+                    self.page_size,
+                    causal=True,
+                    sm_scale=self.sm_scale,
+                    window_left=self.window_left,
+                    logits_soft_cap=self.logits_soft_cap,
+                    q_data_type=q_data_type,
+                    kv_data_type=self.kv_cache_dtype,
+                    fixed_split_size=self.prefill_fixed_split_size,
+                    disable_split_kv=self.disable_split_kv,
+                )
+            attn_metadata.prefill_wrapper = prefill_wrapper
+        else:
+            attn_metadata.qo_indptr_gpu = qo_indptr_cpu.to(
+                self.device, non_blocking=True
+            )
+            attn_metadata.paged_kv_indptr_gpu = paged_kv_indptr_cpu.to(
+                self.device, non_blocking=True
+            )
+
+        return attn_metadata
+
     def build(
         self,
         common_prefix_len: int,
@@ -688,6 +888,76 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 require_uniform=True,
             )
         )
+        num_dycp_reqs = common_attn_metadata.num_dycp_reqs
+        prefill_num_dycp_reqs = max(0, num_dycp_reqs - num_decodes)
+        if (
+            self.dycp_world_size > 1
+            and num_prefills > 0
+            and prefill_num_dycp_reqs > 0
+            and common_prefix_len > 0
+        ):
+            raise NotImplementedError(
+                "GQA DyCP prefill does not support prefix cache yet."
+            )
+
+        is_mixed_dycp_prefill = (
+            self.dycp_world_size > 1
+            and num_decodes == 0
+            and 0 < prefill_num_dycp_reqs < num_prefills
+        )
+        if is_mixed_dycp_prefill:
+            dycp_token_end = int(
+                common_attn_metadata.query_start_loc_cpu[prefill_num_dycp_reqs].item()
+            )
+            dycp_common_attn_metadata = slice_common_attn_metadata(
+                common_attn_metadata,
+                request_slice=slice(0, prefill_num_dycp_reqs),
+                token_slice=slice(0, dycp_token_end),
+                num_dycp_reqs=prefill_num_dycp_reqs,
+                num_dycp_tokens=dycp_token_end,
+            )
+            dp_common_attn_metadata = slice_common_attn_metadata(
+                common_attn_metadata,
+                request_slice=slice(prefill_num_dycp_reqs, num_reqs),
+                token_slice=slice(dycp_token_end, num_actual_tokens),
+                num_dycp_reqs=0,
+                num_dycp_tokens=0,
+            )
+
+            dycp_attn_metadata = self._build_split_prefill_metadata(
+                dycp_common_attn_metadata
+            )
+            dp_attn_metadata = self._build_split_prefill_metadata(
+                dp_common_attn_metadata
+            )
+            if (
+                not dycp_attn_metadata.prefill_use_trtllm
+                or not dp_attn_metadata.prefill_use_trtllm
+            ):
+                self.q_data_type = self.model_config.dtype
+                dycp_attn_metadata.q_data_type = self.model_config.dtype
+                dp_attn_metadata.q_data_type = self.model_config.dtype
+
+            return FlashInferMetadata(
+                num_actual_tokens=num_actual_tokens,
+                q_data_type=self.q_data_type,
+                slot_mapping=common_attn_metadata.slot_mapping,
+                max_q_len=common_attn_metadata.max_query_len,
+                max_q_len_prefill=common_attn_metadata.max_query_len,
+                max_seq_len=common_attn_metadata.max_seq_len,
+                seq_lens=common_attn_metadata.seq_lens,
+                block_table_tensor=common_attn_metadata.block_table_tensor,
+                prefill_use_trtllm=False,
+                decode_use_trtllm=False,
+                num_decodes=num_decodes,
+                num_decode_tokens=num_decode_tokens,
+                num_prefills=num_prefills,
+                num_prefill_tokens=num_prefill_tokens,
+                use_cascade=False,
+                num_dycp_reqs=num_dycp_reqs,
+                _dycp_split=dycp_attn_metadata,
+                _dp_split=dp_attn_metadata,
+            )
 
         page_size = self.page_size
         max_q_len = common_attn_metadata.max_query_len
@@ -1119,6 +1389,41 @@ class FlashInferImpl(AttentionImpl):
             f"Query dtype mismatch: expected {attn_metadata.q_data_type}, "
             f"got {query.dtype}"
         )
+
+        if attn_metadata._dycp_split is not None:
+            dycp_meta = attn_metadata._dycp_split
+            dp_meta = attn_metadata._dp_split
+            assert dp_meta is not None
+
+            dycp_num_tokens = int(dycp_meta.num_actual_tokens)
+            dp_num_tokens = int(dp_meta.num_actual_tokens)
+
+            output[:dycp_num_tokens] = self.forward(
+                layer,
+                query[:dycp_num_tokens],
+                key[:dycp_num_tokens],
+                value[:dycp_num_tokens],
+                kv_cache,
+                dycp_meta,
+                output[:dycp_num_tokens],
+                output_scale,
+                output_block_scale,
+            )
+            if dp_num_tokens > 0:
+                dp_start = dycp_num_tokens
+                dp_end = dp_start + dp_num_tokens
+                output[dp_start:dp_end] = self.forward(
+                    layer,
+                    query[dp_start:dp_end],
+                    key[dp_start:dp_end],
+                    value[dp_start:dp_end],
+                    kv_cache,
+                    dp_meta,
+                    output[dp_start:dp_end],
+                    output_scale,
+                    output_block_scale,
+                )
+            return output
 
         if self.bmm1_scale is None:
             self.bmm1_scale = layer._q_scale_float * layer._k_scale_float * self.scale
