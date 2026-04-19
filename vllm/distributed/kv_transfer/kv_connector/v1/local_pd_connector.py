@@ -474,15 +474,53 @@ class LocalPDConnector(KVConnectorBase_V1):
                         num_tokens_override=tpr,
                     )
 
-        # Clean up prefill tracking after last CP rank processes it
-        if cp_rank == self._cp_world_size - 1:
-            for new_req in scheduler_output.scheduled_new_reqs:
-                self._prefill_requests.pop(new_req.req_id, None)
+        # Don't pop _prefill_requests on first chunk — needed for
+        # subsequent chunks. Will be cleaned in request_finished.
 
-        # Handle cached/resumed requests needing KV load
+        # Handle cached/resumed requests
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for i, req_id in enumerate(cached_reqs.req_ids):
             resumed = req_id in cached_reqs.resumed_req_ids
+
+            # Check if this is a prefill continuation chunk
+            prefill_kv = self._prefill_requests.get(req_id)
+            if prefill_kv and prefill_kv.get("do_remote_decode"):
+                # Subsequent chunk of chunked prefill: mark is_store
+                pd_prefix = prefill_kv.get("pd_request_prefix", "")
+                num_scheduled = scheduler_output.num_scheduled_tokens.get(
+                    req_id, 0
+                )
+                if num_scheduled > 1:  # prefill chunk (not decode step)
+                    cp_size = scheduler_output.cp_rank_scheduled_tokens.get(
+                        req_id, 1
+                    )
+                    if cp_size > 1:
+                        import numpy as np
+                        padded = int(
+                            np.ceil(num_scheduled / (2 * cp_size))
+                            * (2 * cp_size)
+                        )
+                        tpr = padded // cp_size
+                    else:
+                        tpr = None
+                    new_block_ids = cached_reqs.new_block_ids[i]
+                    block_ids = (
+                        new_block_ids[0]
+                        if new_block_ids is not None
+                        else []
+                    )
+                    meta.add_request(
+                        req_id=req_id,
+                        token_ids=[],  # not needed for store
+                        block_ids=block_ids,
+                        block_size=self._block_size,
+                        is_store=True,
+                        pd_request_prefix=pd_prefix,
+                        num_tokens_override=tpr,
+                    )
+                continue
+
+            # Decode load
             if (
                 not resumed
                 or req_id not in self._cross_requests_need_load[cp_rank]
@@ -562,6 +600,8 @@ class LocalPDConnector(KVConnectorBase_V1):
 
             # Store in memory (no file I/O)
             self._completed_prefills[prefix] = meta
+            # Clean up prefill tracking (all chunks done)
+            self._prefill_requests.pop(request.request_id, None)
 
             logger.info(
                 "Prefill finished for prefix=%s "
@@ -830,6 +870,15 @@ class LocalPDConnector(KVConnectorBase_V1):
                         ri = restore_idx[:total].to(layer_gathered.device)
                         ri = torch.clamp(ri, 0, total - 1)
                         layer_gathered = layer_gathered[ri]
+
+                    # Accumulate: append to existing buffer (chunked prefill)
+                    existing = self._gpu_kv_buffer.get(prefix, {}).get(
+                        layer_name
+                    )
+                    if existing is not None:
+                        layer_gathered = torch.cat(
+                            [existing, layer_gathered], dim=0
+                        )
 
                     self._gpu_kv_buffer.setdefault(prefix, {})[layer_name] = (
                         layer_gathered
