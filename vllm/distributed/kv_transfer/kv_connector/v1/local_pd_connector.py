@@ -381,9 +381,8 @@ class LocalPDConnector(KVConnectorBase_V1):
             # Prefill request: track for KV saving, execute normally
             self._prefill_requests[request.request_id] = kv_params
             logger.info(
-                "Tracked prefill request %s for KV saving (prefix=%s)",
-                request.request_id,
-                kv_params.get("pd_request_prefix"),
+                "Tracked prefill req=%s, _prefill_requests now has %d entries",
+                request.request_id, len(self._prefill_requests),
             )
             return 0, False
 
@@ -412,6 +411,15 @@ class LocalPDConnector(KVConnectorBase_V1):
         meta = LocalPDConnectorMetadata(cp_rank=scheduler_output.cp_rank)
         total_need_load = 0
         cp_rank = scheduler_output.cp_rank
+
+        if cp_rank == 0:
+            logger.info(
+                "build_connector_meta START: _prefill_requests=%s, "
+                "new_reqs=%d, num_sched=%s",
+                list(self._prefill_requests.keys())[:3],
+                len(scheduler_output.scheduled_new_reqs),
+                list(scheduler_output.num_scheduled_tokens.keys())[:3],
+            )
 
         for new_req in scheduler_output.scheduled_new_reqs:
             token_ids = new_req.prompt_token_ids or []
@@ -474,51 +482,42 @@ class LocalPDConnector(KVConnectorBase_V1):
                         num_tokens_override=tpr,
                     )
 
-        # Don't pop _prefill_requests on first chunk — needed for
-        # subsequent chunks. Will be cleaned in request_finished.
+        # Check for prefill continuation chunks in running requests.
+        # Running requests appear in num_scheduled_tokens but NOT in
+        # scheduled_new_reqs or scheduled_cached_reqs.
+        processed_new = {nr.req_id for nr in scheduler_output.scheduled_new_reqs}
+        for req_id, num_sched in scheduler_output.num_scheduled_tokens.items():
+            if req_id in processed_new:
+                continue  # Already handled in new_reqs loop
+            prefill_kv = self._prefill_requests.get(req_id)
+            if prefill_kv and prefill_kv.get("do_remote_decode") and num_sched > 1:
+                # Running prefill continuation chunk
+                pd_prefix = prefill_kv.get("pd_request_prefix", "")
+                cp_size = scheduler_output.cp_rank_scheduled_tokens.get(
+                    req_id, 1
+                )
+                if cp_size > 1:
+                    import numpy as np
+                    padded = int(
+                        np.ceil(num_sched / (2 * cp_size)) * (2 * cp_size)
+                    )
+                    tpr = padded // cp_size
+                else:
+                    tpr = None
+                meta.add_request(
+                    req_id=req_id,
+                    token_ids=[],
+                    block_ids=[],  # block_ids not needed for pre-mask save
+                    block_size=self._block_size,
+                    is_store=True,
+                    pd_request_prefix=pd_prefix,
+                    num_tokens_override=tpr,
+                )
 
-        # Handle cached/resumed requests
+        # Handle cached/resumed requests (decode load)
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for i, req_id in enumerate(cached_reqs.req_ids):
             resumed = req_id in cached_reqs.resumed_req_ids
-
-            # Check if this is a prefill continuation chunk
-            prefill_kv = self._prefill_requests.get(req_id)
-            if prefill_kv and prefill_kv.get("do_remote_decode"):
-                # Subsequent chunk of chunked prefill: mark is_store
-                pd_prefix = prefill_kv.get("pd_request_prefix", "")
-                num_scheduled = scheduler_output.num_scheduled_tokens.get(
-                    req_id, 0
-                )
-                if num_scheduled > 1:  # prefill chunk (not decode step)
-                    cp_size = scheduler_output.cp_rank_scheduled_tokens.get(
-                        req_id, 1
-                    )
-                    if cp_size > 1:
-                        import numpy as np
-                        padded = int(
-                            np.ceil(num_scheduled / (2 * cp_size))
-                            * (2 * cp_size)
-                        )
-                        tpr = padded // cp_size
-                    else:
-                        tpr = None
-                    new_block_ids = cached_reqs.new_block_ids[i]
-                    block_ids = (
-                        new_block_ids[0]
-                        if new_block_ids is not None
-                        else []
-                    )
-                    meta.add_request(
-                        req_id=req_id,
-                        token_ids=[],  # not needed for store
-                        block_ids=block_ids,
-                        block_size=self._block_size,
-                        is_store=True,
-                        pd_request_prefix=pd_prefix,
-                        num_tokens_override=tpr,
-                    )
-                continue
 
             # Decode load
             if (
@@ -775,9 +774,30 @@ class LocalPDConnector(KVConnectorBase_V1):
                     cp_rank, prefix,
                 )
             else:
-                # Single CP rank: extract from paged buffer, store in GPU buffer
-                sm = req_meta.slot_mapping
+                # Single CP rank: extract from paged buffer.
+                # Use attn_metadata.slot_mapping (works for all chunks)
+                # instead of req_meta.slot_mapping (may be empty for
+                # continuation chunks).
+                actual_sm = getattr(attn_metadata, "slot_mapping", None)
+                if actual_sm is not None:
+                    actual_sm = actual_sm.flatten()
+                    # Filter to valid slots only
+                    valid = actual_sm >= 0
+                    sm = actual_sm[valid]
+                else:
+                    sm = req_meta.slot_mapping
+                if sm.shape[0] == 0:
+                    continue
                 kv_data = _extract_kv_from_layer(kv_layer, sm, is_mla)
+                # Accumulate across chunks for chunked prefill
+                existing = self._gpu_kv_buffer.get(prefix, {}).get(
+                    layer_name
+                )
+                if existing is not None:
+                    if is_mla:
+                        kv_data = torch.cat([existing, kv_data], dim=0)
+                    else:
+                        kv_data = torch.cat([existing, kv_data], dim=1)
                 self._gpu_kv_buffer.setdefault(prefix, {})[layer_name] = (
                     kv_data.detach()
                 )
