@@ -141,9 +141,41 @@ CP 并行的收益在超长序列上才显著：
 3. **单步 prefill 限制**: 当前 all-gather KV 仅捕获一步的 local KV，超长序列的 chunked prefill 需要跨步累积
 4. **DualChunkSwap padding**: restore index 对 padding token 的处理可能导致与原始 DyCP 输出的微小差异
 
+## 附录: 性能优化迭代
+
+### 优化 1: GPU Memory Buffer (消除文件 I/O)
+
+**改动**: 用 GPU 内存 dict 替代 safetensors 文件 save/load，消除 54 次 GPU↔CPU copy + disk I/O。
+
+| Input Tokens | File I/O (CP) | GPU Buffer (CP) | 改善 |
+|-------------|---------------|-----------------|------|
+| ~200 | 825ms | 871ms | -5.6% |
+| ~2000 | 674ms | 620ms | **+8.0%** |
+| ~4000 | 779ms | 679ms | **+12.8%** |
+
+### 优化 2: Batch All-Gather (合并 27 次 NCCL 为 1 次)
+
+**改动**: 将 27 层的 local KV 拼接成一个 tensor，做 1 次 NCCL all-gather，而非 27 次。
+
+| Input Tokens | Per-Layer AG | Batch AG | 改善 |
+|-------------|-------------|----------|------|
+| ~200 | 871ms | 855ms | +1.9% |
+| ~2000 | 620ms | 601ms | **+3.1%** |
+| ~4000 | 679ms | 673ms | +0.9% |
+
+### 优化总效果 (File I/O → Batch AG)
+
+| Input Tokens | 原始 (File I/O+CP) | 最终 (Batch AG) | 总改善 |
+|-------------|-------------------|-----------------|--------|
+| ~200 | 825ms | 855ms | -3.6% |
+| ~2000 | 674ms | 601ms | **+10.8%** |
+| ~4000 | 779ms | 673ms | **+13.6%** |
+
 ## 7. 结论
 
 1. **PD 分离架构可行**: Proxy + KV Connector 成功实现了 prefill (全 CP) → decode (CP=1) 的分离
-2. **精度正确**: Pre-mask KV capture 解决了 interleave mask 导致的 KV 丢失问题，PD 分离模式输出质量正确
-3. **性能**: 短/中等长度 prompt 下 CP 的加速效果被通信开销抵消，预期在超长序列 (>32K) 上收益显著
-4. **改进方向**: 减少 KV 传输开销（GPU direct）、支持 chunked prefill 跨步累积、优化 all-gather 通信
+2. **精度正确**: Pre-mask KV capture 解决了 interleave mask 导致的 KV 丢失问题，PD 分离模式输出质量正确且**优于** Direct DyCP 全 CP 模式
+3. **性能优化**: GPU buffer + batch all-gather 将长 prompt 延迟降低 10-14%
+4. **短请求开销**: ~200 tokens 场景下 PD 分离有 ~5% 额外开销，来自 proxy HTTP 往返和 NCCL all-gather
+5. **长序列预期收益**: CP 的 prefill 加速在超长序列 (>32K tokens) 上才显著，此时 prefill 计算量远大于通信开销
+6. **改进方向**: 异步 all-gather + prefill overlap、减少 proxy HTTP 开销、支持 chunked prefill 跨步累积
