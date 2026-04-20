@@ -276,10 +276,32 @@ c=8 低并发下 CP 的 P99 改善 3.9%，总吞吐持平。
   - CP：全 rank CP prefill 占满所有 rank，decode 必须等 CP prefill 完成后才能调度
   - 高并发下大量 decode 请求被 CP prefill 阻塞，导致吞吐降低
 
-**优化方向**：
-1. 减少 CP 占用的 rank 数（如 dp_per_domain=4），留出 rank 给 decode
-2. Phase 2 混跑：允许 CP prefill 和 decode 在同一 batch 中（需解决 NCCL 同步）
-3. Internal PD routing：消除 proxy 开销，加速 batch 切换
+### Prefill-Decode 干扰验证 (no-CP 模式)
+
+| 场景 | 总时间 | 说明 |
+|------|--------|------|
+| 纯短请求 (8 × decode) | 962ms | 无干扰基线 |
+| **混合 (1 long 8K + 7 short)** | **1301ms** | **prefill 拖慢 decode +35%** |
+| 纯长请求 (8 × 8K) | 1517ms | 全 prefill |
+
+**结论**：MoE all-to-all 同步确实导致 prefill 拖慢同 batch 中的 decode。CP 模式通过隔离 prefill 和 decode batch 避免了这个干扰。
+
+### Direct 模式（无 proxy）高并发对比 (c=32, 30 prompts, 8K/200, rate=2)
+
+| 指标 | Direct no-CP | Direct CP | Delta |
+|------|-------------|-----------|-------|
+| Total tok/s | 13958 | 12158 | **-12.9%** |
+| Avg Latency | 6380ms | **3694ms** | **-42.1%** |
+| P50 | 7473ms | **3693ms** | **-50.6%** |
+
+**CP 延迟大幅改善（-50%），但吞吐仍低 12.9%**。
+
+**分析**：
+- CP 优势：隔离 prefill/decode 干扰 + CP 加速 prefill → 延迟大幅改善
+- CP 劣势：batch 分离的串行化（prefill→gap→decode→gap→prefill 循环）
+- 12.9% 吞吐损失 ≈ batch 切换 gap (~5%) + CP all-gather 通信 (~8%)
+- 在延迟敏感场景（TTFT），CP 有压倒性优势（-50% P50）
+- 在吞吐敏感场景，CP 有~13% 的代价
 
 ### `--api-server-count` 尝试
 启动 2 个 API server 进程导致 EngineCore crash，与 DyCP domain executor 不兼容。需要进一步调查。
