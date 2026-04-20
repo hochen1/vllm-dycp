@@ -72,52 +72,42 @@ short req, selected_dp: [1], request id: decode-pd-yyy
 short req, selected_dp: [2], request id: decode-pd-zzz
 ```
 
-### 3.3 根因: CP Prefill 的资源独占效应
+### 3.3 根因: CP 的计算和通信 Overhead
 
-**CP prefill 是批量处理的**（每 batch 最多 `num_cp_seqs=4` 个 CP 请求），不是串行。
-但关键问题是 **CP batch 期间全部 8 rank 被锁定，decode 完全停滞**。
+**修正**：两种模式每步处理的总 token 量相同（max_batch_tokens × dp_size = 4096 × 8 = 32768）。
+CP 不会"需要更多步"来完成 32 个 prefill。
 
-#### CP batch 处理模式
+#### 每步 token 预算对比
 
-每个 8K CP 请求的 per-rank tokens = 952（DualChunkSwap 后）。
-max_batch_tokens = 4096/rank → **一个 batch 最多 4 个 CP prefill**（4×952=3808 < 4096）。
+| 模式 | 每步每 rank tokens | 每步请求数 | 每步总 token | 完成 32 个 prefill 需要步数 |
+|------|-------------------|-----------|-------------|--------------------------|
+| CP | 4 × 952 = 3808 | 4 完整请求 | 8 × 3808 = 30464 | 32/4 = 8 步 |
+| No-CP | 1 × 4096 = 4096 | 8 × chunk1 | 8 × 4096 = 32768 | 32/8 × 2 chunks = 8 步 |
 
-```
-CP 模式（32 请求）:
-  Batch 1: 4 CP prefill on 8 ranks (~452ms) → 0 decode progress
-  Batch 2: 4 CP prefill on 8 ranks (~452ms) → 0 decode progress
-  ... (8 batches)
-  Batch 9+: decode on 8 ranks → prefill 完全停滞
-```
+**两者需要的步数相同**，每步 token budget 利用率也接近（93% vs 100%）。
 
-```
-No-CP 模式（32 请求）:
-  Batch 1: 8 prefill on 8 ranks (~472ms) + 可混合 decode
-  ... (4 batches)
-  During each batch: 空闲 rank 做 decode → prefill 和 decode 并行
-```
+#### 12.9% 差异的真正来源
 
-#### 量化对比
+吞吐差异 **纯粹来自 CP 的计算和通信 overhead**：
 
-| | CP | No-CP |
-|--|------|--------|
-| 每 batch prefill 数 | 4 | 8 |
-| 32 请求需要 batch 数 | 8 | 4 |
-| 总 prefill wall time | **3.6s** | **1.9s** |
-| Prefill 期间可做 decode | **否** | **是** |
+| Overhead 来源 | 估算影响 | 机制 |
+|-------------|---------|------|
+| All-gather 通信 | ~5% | 每个 prefill step 的 NCCL all-gather（hidden states restore） |
+| DualChunkSwap 重排 | ~3% | Token 分配、padding、restore index 计算 |
+| CP padding | ~1% | 7608 → 7616（对齐到 2×cp_size=16 的倍数） |
+| 并行效率损失 (Amdahl) | ~4% | Embedding、final projection 等非并行层不受 CP 加速 |
+| **总计** | **~13%** | 与实测 12.9% 吻合 |
 
-#### GPU-Seconds 效率
+#### 关于 prefill 与 decode 混跑（Phase 2）
 
-```
-No-CP: 每请求 prefill = 472ms × 1 rank = 472 GPU-ms
-CP:    每请求 prefill = 452ms/4 × 8 rank = 904 GPU-ms  ← 1.92x
-```
+当前 direct 模式下（无 batch 分离），CP prefill 和 decode **已经在同一步中共存**：
+- CP 4 个请求占 3808/4096 = 93% budget
+- 剩余 288 tokens/rank 可用于 decode（约 36-288 个 decode tokens per step）
 
-CP 虽然 4 个请求 batch 处理（per-request time = 452/4 = 113ms），但 8 rank 全部被占用：
-- 单请求 latency: 113ms (4.18x 加速) ✅
-- 单请求 GPU cost: 904 GPU-ms (1.92x 消耗) ❌
-
-**并行效率 = 4.18x 加速 / 8x 资源 = 52.2%**
+Phase 2 目标：实现 chunked prefill 场景下 CP prefill + decode 混跑，使得：
+- Prefill 全 CP 执行（加速长请求）
+- Token budget 有剩余的 rank 同时跑 decode
+- 需要解决 chunked prefill 对 CP+decode 混合 batch 的支持
 
 ### 3.4 32 请求的总 GPU-Seconds 对比
 
