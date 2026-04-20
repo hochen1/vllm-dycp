@@ -267,14 +267,19 @@ c=8 低并发下 CP 的 P99 改善 3.9%，总吞吐持平。
 | Decode tok/s | 351.7 | 288.9 | -17.9% |
 | **Total tok/s** | **7849.7** | **6447.8** | **-17.9%** |
 
-**c=32 高并发下 CP 吞吐降低 17.9%**。根因：batch 分离导致 GPU 利用率下降。
-CP prefill 时 8 rank 全忙；CP=1 decode 时只有 1 rank 工作、7 rank idle。
-高并发放大了这个 idle time 的占比。
+**c=32 高并发下 CP 吞吐降低 17.9%**。
 
-**结论**：当前 PD+CP 方案在 **低并发** 场景最有价值（TTFT -65%，吞吐持平），
-但在 **高并发** 场景下吞吐有损（-17.9%）。优化方向：
-1. 减少 batch 分离 idle time（Phase 2 混跑或 internal routing）
-2. decode 使用多 DP rank 并行（当前 CP=1 只用 1 rank）
+**根因分析（修正）**：
+- ~~idle ranks~~（错误）：decode 分布在所有 rank 上，不存在 rank 空闲
+- **真正根因：CP prefill 独占全部 rank，decode 无法并行**
+  - No-CP：单 rank prefill + 多 rank decode 可以在同一 batch 中共存（不同 rank 上并行）
+  - CP：全 rank CP prefill 占满所有 rank，decode 必须等 CP prefill 完成后才能调度
+  - 高并发下大量 decode 请求被 CP prefill 阻塞，导致吞吐降低
+
+**优化方向**：
+1. 减少 CP 占用的 rank 数（如 dp_per_domain=4），留出 rank 给 decode
+2. Phase 2 混跑：允许 CP prefill 和 decode 在同一 batch 中（需解决 NCCL 同步）
+3. Internal PD routing：消除 proxy 开销，加速 batch 切换
 
 ### `--api-server-count` 尝试
 启动 2 个 API server 进程导致 EngineCore crash，与 DyCP domain executor 不兼容。需要进一步调查。
