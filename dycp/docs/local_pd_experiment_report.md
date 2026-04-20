@@ -171,6 +171,23 @@ CP 并行的收益在超长序列上才显著：
 | ~2000 | 674ms | 601ms | **+10.8%** |
 | ~4000 | 779ms | 673ms | **+13.6%** |
 
+## 附录 B: 优化历程（含 Commit ID）
+
+| # | Commit | 优化 | 效果 |
+|---|--------|------|------|
+| 1 | `34ff68db1` | Local PD Separation 完整实现 | 功能基线 |
+| 2 | `c824f4a64` | GPU memory buffer 替代文件 I/O | 长 prompt +12.8% |
+| 3 | `b0376abdc` | Batch all-gather (27→1 NCCL) | +3.1% |
+| 4 | `dc87cf3d3` | Timing instrumentation | 定位瓶颈 |
+| 5 | `9017b5576` | Proxy connection pooling | overhead 43ms→19ms |
+| 6 | `59bc49e7a` | 恢复 batch 分离 + NCCL deadlock 注释 | 稳定性 |
+| 7 | `9ac7d33b1` | Chunked prefill KV 累积 (multi-CP) | 8K+ 支持 |
+| 8 | `4f07a3d4f` | Chunked prefill (single-CP) 修复 | 8K no-CP 支持 |
+| 9 | `a06ecf6cd` | Decode save_kv_layer fast-path skip | decode +2.9% per-tok |
+| 10 | `a579cd7ac` | 8K 高并发 benchmark 结果 | 数据 |
+| 11 | `4404ad83f` | 固定开销分析报告 | 分析 |
+| 12 | `d779a7d59` | Token ID decode (跳过 re-tokenize) | TTFT -12ms |
+
 ## 7. 结论
 
 1. **PD 分离架构可行**: Proxy + KV Connector 成功实现了 prefill (全 CP) → decode (CP=1) 的分离
@@ -237,7 +254,27 @@ CP 并行的收益在超长序列上才显著：
 | Prompt tok/s | 3654.6 | 3676.2 | +0.6% |
 | Total tok/s | 3826.0 | 3848.7 | +0.6% |
 
-高并发下 CP 的 P99 改善 3.9%，总吞吐持平略优。
+c=8 低并发下 CP 的 P99 改善 3.9%，总吞吐持平。
+
+### 8K 高并发 Benchmark (c=32, 30 prompts, 8K/200, request_rate=2)
+
+| 指标 | PD 无 CP | PD 有 CP | Delta |
+|------|----------|----------|-------|
+| Avg Latency | 3269ms | 5453ms | +66.8% |
+| P50 | 3281ms | 6180ms | +88.3% |
+| P99 | 4373ms | 7760ms | +77.5% |
+| Prompt tok/s | 7498.0 | 6158.9 | **-17.9%** |
+| Decode tok/s | 351.7 | 288.9 | -17.9% |
+| **Total tok/s** | **7849.7** | **6447.8** | **-17.9%** |
+
+**c=32 高并发下 CP 吞吐降低 17.9%**。根因：batch 分离导致 GPU 利用率下降。
+CP prefill 时 8 rank 全忙；CP=1 decode 时只有 1 rank 工作、7 rank idle。
+高并发放大了这个 idle time 的占比。
+
+**结论**：当前 PD+CP 方案在 **低并发** 场景最有价值（TTFT -65%，吞吐持平），
+但在 **高并发** 场景下吞吐有损（-17.9%）。优化方向：
+1. 减少 batch 分离 idle time（Phase 2 混跑或 internal routing）
+2. decode 使用多 DP rank 并行（当前 CP=1 只用 1 rank）
 
 ### `--api-server-count` 尝试
 启动 2 个 API server 进程导致 EngineCore crash，与 DyCP domain executor 不兼容。需要进一步调查。
