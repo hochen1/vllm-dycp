@@ -971,7 +971,7 @@ class EngineCoreProc(EngineCore):
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_outputs, model_outputs
         )
-        
+
         model_executed = any([so.total_num_scheduled_tokens > 0 for so in scheduler_outputs])
         return engine_core_outputs, model_executed
 

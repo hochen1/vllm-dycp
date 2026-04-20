@@ -3585,7 +3585,6 @@ class GPUModelRunner(
                 if dycp_has_prefill:
                     num_cp_request = scheduler_output.num_cp_request
                     num_dycp_tokens_unpadded = int(num_scheduled_tokens_np[:num_cp_request].sum())
-
                     dycp_hidden_states = hidden_states[:num_dycp_tokens_unpadded]
                     non_dycp_hidden_states = hidden_states[num_dycp_tokens_unpadded:]
 

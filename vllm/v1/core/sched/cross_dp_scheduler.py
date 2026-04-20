@@ -301,47 +301,6 @@ class CrossDPScheduler(Scheduler):
             return "prefill"
         return None
 
-    # ==============================
-    # Local PD Separation: Batch mode determination
-    # ==============================
-
-    @staticmethod
-    def _is_pd_decode_request(request: Request) -> bool:
-        """Check if a request is a PD-separation decode request."""
-        kv_params = request.kv_transfer_params
-        return bool(kv_params and kv_params.get("do_remote_prefill"))
-
-    def _determine_batch_mode(self) -> str:
-        """Determine the current batch mode for Phase 1 PD separation.
-
-        Returns:
-            "prefill" - only schedule prefill requests
-            "decode" - only schedule decode (PD) requests
-            "any" - no PD separation active, schedule normally
-        """
-        # Check running requests for PD separation requests
-        has_running_decode = False
-        has_running_prefill = False
-        for request in self.running:
-            if self._is_pd_decode_request(request):
-                has_running_decode = True
-            else:
-                has_running_prefill = True
-
-        # If there are running requests, maintain their batch type
-        if has_running_decode:
-            return "decode"
-        if has_running_prefill:
-            return "prefill"
-
-        # No running requests: check waiting queue
-        # Prioritize decode requests to avoid starvation
-        for request in self.waiting:
-            if self._is_pd_decode_request(request):
-                return "decode"
-
-        return "prefill"
-
     def _update_after_schedule(
         self,
         scheduler_output: SchedulerOutput,
@@ -746,8 +705,6 @@ class CrossDPScheduler(Scheduler):
         # For logging.
         scheduled_timestamp = time.monotonic()
 
-        # PD separation: determine batch mode to avoid NCCL deadlock
-        batch_mode = self._determine_batch_mode()
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -875,24 +832,11 @@ class CrossDPScheduler(Scheduler):
                 if request is None:
                     break
 
-                # PD separation: batch mode enforcement.
-                # Mixing CP prefill and CP=1 decode in same batch
-                # causes NCCL collective deadlock (some ranks don't
-                # participate in all-gather). Must separate.
-                is_pd_decode = self._is_pd_decode_request(request)
-                if batch_mode == "decode" and not is_pd_decode:
-                    self.waiting.pop_request()
-                    skipped_waiting_requests.prepend_request(request)
-                    continue
-                if batch_mode == "prefill" and is_pd_decode:
-                    self.waiting.pop_request()
-                    skipped_waiting_requests.prepend_request(request)
-                    continue
-
                 is_long = self.waiting.is_long_request(request)
 
-                # PD decode requests always use CP=1
-                if is_pd_decode:
+                # PD decode requests always use CP=1 (single rank)
+                kv_params = request.kv_transfer_params
+                if kv_params and kv_params.get("do_remote_prefill"):
                     is_long = False
 
                 if len(request.cp_ranks) == 0:

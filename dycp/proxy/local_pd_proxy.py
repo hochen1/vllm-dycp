@@ -22,6 +22,7 @@ import argparse
 import copy
 import json
 import logging
+import os
 import sys
 import uuid
 
@@ -77,6 +78,132 @@ def _auth_headers() -> dict[str, str]:
     if proxy_config.api_key:
         headers["Authorization"] = f"Bearer {proxy_config.api_key}"
     return headers
+
+
+def _estimate_token_count(body: dict) -> int:
+    """
+    Estimate the number of prompt tokens from the request body.
+
+    For /v1/completions: body["prompt"] is a string or list of token IDs.
+    For /v1/chat/completions: body["messages"] is a list of message dicts.
+
+    Uses a simple heuristic: character count / 4 for strings, or len() for
+    token ID lists.
+    """
+    prompt = body.get("prompt")
+    if prompt is not None:
+        if isinstance(prompt, str):
+            return max(len(prompt) // 4, 1)
+        if isinstance(prompt, list):
+            # List of token IDs or list of strings
+            if prompt and isinstance(prompt[0], int):
+                return len(prompt)
+            # List of strings — sum character counts
+            return max(sum(len(s) for s in prompt) // 4, 1)
+
+    messages = body.get("messages")
+    if messages is not None:
+        total_chars = sum(
+            len(msg.get("content", ""))
+            for msg in messages
+            if isinstance(msg.get("content"), str)
+        )
+        return max(total_chars // 4, 1)
+
+    return 0
+
+
+def _get_long_request_threshold() -> int:
+    """Read the token threshold from env var VLLM_LONG_REQUEST_THRESHOLD."""
+    return int(os.environ.get("VLLM_LONG_REQUEST_THRESHOLD", "100"))
+
+
+# ---------------------------------------------------------------------------
+# Direct forwarding (short requests)
+# ---------------------------------------------------------------------------
+async def _forward_direct(
+    endpoint: str,
+    body: dict,
+    request_id: str,
+) -> StreamingResponse | JSONResponse:
+    """
+    Forward a short request directly to vLLM without PD separation.
+    Supports both streaming and non-streaming modes.
+    """
+    session = await proxy_config.get_session()
+    headers = _auth_headers()
+    headers["X-Request-Id"] = request_id
+    is_streaming = body.get("stream", False)
+
+    if is_streaming:
+        async def stream_generator():
+            try:
+                async with session.post(
+                    f"{proxy_config.vllm_url}{endpoint}",
+                    json=body,
+                    headers=headers,
+                ) as resp:
+                    if resp.status >= 400:
+                        error_body = await resp.read()
+                        logger.error(
+                            "Direct forward failed [%s] status=%d: %s",
+                            request_id, resp.status,
+                            error_body.decode(errors="replace"),
+                        )
+                        yield error_body
+                        return
+                    async for chunk in resp.content.iter_chunked(1024):
+                        yield chunk
+            except aiohttp.ClientError as exc:
+                logger.error(
+                    "Direct forward connection error [%s]: %s",
+                    request_id, exc,
+                )
+                error_payload = json.dumps({
+                    "error": {
+                        "message": f"Direct forward connection error: {exc}",
+                        "type": "proxy_error",
+                        "code": 502,
+                    }
+                }).encode()
+                yield error_payload
+
+        return StreamingResponse(
+            stream_generator(), media_type="text/event-stream",
+        )
+    else:
+        try:
+            async with session.post(
+                f"{proxy_config.vllm_url}{endpoint}",
+                json=body,
+                headers=headers,
+            ) as resp:
+                resp_body = await resp.read()
+                if resp.status >= 400:
+                    logger.error(
+                        "Direct forward failed [%s] status=%d: %s",
+                        request_id, resp.status,
+                        resp_body.decode(errors="replace"),
+                    )
+                return JSONResponse(
+                    status_code=resp.status,
+                    content=json.loads(resp_body),
+                )
+        except aiohttp.ClientError as exc:
+            logger.error(
+                "Direct forward connection error [%s]: %s",
+                request_id, exc,
+            )
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "error": {
+                        "message": f"Direct forward connection error: {exc}",
+                        "type": "proxy_error",
+                        "code": 502,
+                    }
+                },
+            )
 
 
 def _build_prefill_request(
@@ -303,16 +430,143 @@ async def _handle_pd_request(endpoint: str, request: Request):
 
 
 # ---------------------------------------------------------------------------
+# Request dispatcher (short vs long)
+# ---------------------------------------------------------------------------
+async def _dispatch_request(endpoint: str, request: Request):
+    """
+    Route incoming requests based on estimated prompt length.
+
+    Short requests (estimated tokens < threshold) are forwarded directly to
+    vLLM without PD separation.  Long requests go through the two-phase
+    prefill-then-decode flow.
+    """
+    body = await request.json()
+    estimated_tokens = _estimate_token_count(body)
+    threshold = _get_long_request_threshold()
+
+    if estimated_tokens < threshold:
+        request_id = f"direct-{uuid.uuid4().hex[:12]}"
+        logger.info(
+            "Short request [%s] endpoint=%s model=%s "
+            "estimated_tokens=%d (< threshold=%d) -> direct forward",
+            request_id, endpoint, body.get("model", "unknown"),
+            estimated_tokens, threshold,
+        )
+        return await _forward_direct(endpoint, body, request_id)
+    else:
+        logger.info(
+            "Long request endpoint=%s model=%s "
+            "estimated_tokens=%d (>= threshold=%d) -> PD two-phase",
+            endpoint, body.get("model", "unknown"),
+            estimated_tokens, threshold,
+        )
+        return await _handle_pd_request_with_body(endpoint, body)
+
+
+async def _handle_pd_request_with_body(endpoint: str, original_body: dict):
+    """
+    Two-phase PD flow, accepting a pre-parsed request body.
+    Extracted from _handle_pd_request to allow _dispatch_request to parse
+    the body once and pass it in.
+    """
+    prefix = _make_request_prefix()
+    prefill_request_id = f"prefill-{prefix}"
+    decode_request_id = f"decode-{prefix}"
+
+    logger.info(
+        "New PD request [%s] endpoint=%s model=%s",
+        prefix, endpoint, original_body.get("model", "unknown"),
+    )
+
+    # --- Phase 1: Prefill ---
+    prefill_req = _build_prefill_request(original_body, prefix)
+
+    try:
+        session = await proxy_config.get_session()
+        prefill_resp = await _do_prefill(
+            session, endpoint, prefill_req, prefill_request_id,
+        )
+    except aiohttp.ClientResponseError as exc:
+        logger.error("Prefill request failed [%s]: %s", prefix, exc.message)
+        return JSONResponse(
+            status_code=exc.status,
+            content={
+                "error": {
+                    "message": f"Prefill failed: {exc.message}",
+                    "type": "proxy_error",
+                    "code": exc.status,
+                }
+            },
+        )
+    except aiohttp.ClientError as exc:
+        logger.error("Prefill connection error [%s]: %s", prefix, exc)
+        return JSONResponse(
+            status_code=502,
+            content={
+                "error": {
+                    "message": f"Prefill connection error: {exc}",
+                    "type": "proxy_error",
+                    "code": 502,
+                }
+            },
+        )
+
+    # Extract kv_transfer_params from prefill response
+    prefill_kv_params = prefill_resp.get("kv_transfer_params")
+    logger.info(
+        "Prefill completed [%s] kv_transfer_params=%s",
+        prefix, prefill_kv_params,
+    )
+
+    # --- Phase 2: Decode ---
+    decode_req = _build_decode_request(
+        original_body, prefix, prefill_kv_params,
+    )
+    is_streaming = original_body.get("stream", False)
+
+    # Use /v1/completions for decode when token IDs available
+    decode_endpoint = endpoint
+    if decode_req.pop("_use_token_ids", False):
+        decode_endpoint = "/v1/completions"
+
+    logger.info(
+        "Starting decode [%s] endpoint=%s streaming=%s",
+        prefix, decode_endpoint, is_streaming,
+    )
+
+    async def generate():
+        try:
+            session = await proxy_config.get_session()
+            async for chunk in _stream_decode(
+                session, decode_endpoint, decode_req, decode_request_id,
+            ):
+                yield chunk
+        except aiohttp.ClientError as exc:
+            logger.error("Decode connection error [%s]: %s", prefix, exc)
+            error_payload = json.dumps({
+                "error": {
+                    "message": f"Decode connection error: {exc}",
+                    "type": "proxy_error",
+                    "code": 502,
+                }
+            }).encode()
+            yield error_payload
+
+    media_type = "text/event-stream" if is_streaming else "application/json"
+    return StreamingResponse(generate(), media_type=media_type)
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 @app.post("/v1/completions")
 async def create_completion(request: Request):
-    return await _handle_pd_request("/v1/completions", request)
+    return await _dispatch_request("/v1/completions", request)
 
 
 @app.post("/v1/chat/completions")
 async def create_chat_completion(request: Request):
-    return await _handle_pd_request("/v1/chat/completions", request)
+    return await _dispatch_request("/v1/chat/completions", request)
 
 
 @app.get("/health")

@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     VLLM_RPC_BASE_PATH: str = tempfile.gettempdir()
     VLLM_USE_MODELSCOPE: bool = False
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
+    VLLM_MQ_MAX_CHUNKS: int = 100
     VLLM_NCCL_SO_PATH: str | None = None
     LD_LIBRARY_PATH: str | None = None
     VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE: int = 256
@@ -191,7 +192,7 @@ if TYPE_CHECKING:
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_SLEEP_WHEN_IDLE: bool = False
-    VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
+    VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 128
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_KV_CACHE_LAYOUT: Literal["NHD", "HND"] | None = None
     VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
@@ -544,6 +545,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Interval in seconds to log a warning message when the ring buffer is full
     "VLLM_RINGBUFFER_WARNING_INTERVAL": lambda: int(
         os.environ.get("VLLM_RINGBUFFER_WARNING_INTERVAL", "60")
+    ),
+    # Maximum number of chunks in the shared memory message queue ring buffer.
+    # Increase if you see "ShmRingBuffer full" errors under high concurrency.
+    "VLLM_MQ_MAX_CHUNKS": lambda: int(
+        os.environ.get("VLLM_MQ_MAX_CHUNKS", "100")
     ),
     # path to cudatoolkit home directory, under which should be bin, include,
     # and lib directories.
@@ -1338,7 +1344,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Object larger than this threshold will be broadcast to worker
     # processes via zmq.
     "VLLM_MQ_MAX_CHUNK_BYTES_MB": lambda: int(
-        os.getenv("VLLM_MQ_MAX_CHUNK_BYTES_MB", "16")
+        os.getenv("VLLM_MQ_MAX_CHUNK_BYTES_MB", "128")
     ),
     # Timeout in seconds for execute_model RPC calls in multiprocessing
     # executor (only applies when TP > 1).
@@ -1654,6 +1660,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_RPC_BASE_PATH",
         "VLLM_USE_MODELSCOPE",
         "VLLM_RINGBUFFER_WARNING_INTERVAL",
+        "VLLM_MQ_MAX_CHUNKS",
         "VLLM_DEBUG_DUMP_PATH",
         "VLLM_PORT",
         "VLLM_CACHE_ROOT",

@@ -458,6 +458,22 @@ class LocalPDConnector(KVConnectorBase_V1):
                 kv_params = self._prefill_requests.get(
                     new_req.req_id, None
                 )
+                # Fallback: if get_num_new_matched_tokens was never
+                # called for this request (e.g., it was deferred in the
+                # waiting queue across scheduling rounds), retrieve
+                # kv_transfer_params directly from the request object
+                # and register it now.
+                if kv_params is None and new_req.sampling_params is not None:
+                    fallback_kv = (new_req.sampling_params.extra_args or {}).get(
+                        "kv_transfer_params", None)
+                    if fallback_kv and fallback_kv.get("do_remote_decode"):
+                        kv_params = fallback_kv
+                        self._prefill_requests[new_req.req_id] = kv_params
+                        logger.warning(
+                            "build_connector_meta: late-registered "
+                            "prefill req=%s via sampling_params fallback",
+                            new_req.req_id,
+                        )
                 if kv_params and kv_params.get("do_remote_decode"):
                     pd_prefix = kv_params.get("pd_request_prefix", "")
                     # Determine actual CP size for this request
@@ -498,6 +514,9 @@ class LocalPDConnector(KVConnectorBase_V1):
                 continue  # Already handled in new_reqs loop
             prefill_kv = self._prefill_requests.get(req_id)
             if prefill_kv and prefill_kv.get("do_remote_decode") and num_sched > 1:
+                # Skip requests not assigned to this cp_rank
+                if scheduler_output.cp_rank_scheduled_tokens.get(req_id, 0) == 0:
+                    continue
                 # Running prefill continuation chunk
                 pd_prefix = prefill_kv.get("pd_request_prefix", "")
                 cp_size = scheduler_output.cp_rank_scheduled_tokens.get(
