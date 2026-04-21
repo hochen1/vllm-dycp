@@ -3253,8 +3253,11 @@ class GPUModelRunner(
             # running prefills. This lets us set cudagraph_mode="NONE" on the prefiller
             # in a P/D setup and still use CUDA graphs (enabled by this padding) on the
             # decoder.
+            # Exception: EP (Expert Parallel) all-to-all requires all ranks to
+            # have the same token count, so force DP padding when EP is active.
             allow_dp_padding = (
                 self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+                or self.parallel_config.enable_expert_parallel
             )
 
             should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = (
