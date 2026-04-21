@@ -466,8 +466,27 @@ class MessageQueue:
 
                     # if we wait for a long time, log a message
                     if elapsed > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning:
+                        # Diagnostic: scan all blocks to find leak
+                        block_status = []
+                        for bi in range(self.buffer.max_chunks):
+                            with self.buffer.get_metadata(bi) as mb:
+                                w = mb[0]
+                                rflags = [mb[j+1] for j in range(self.buffer.n_reader)]
+                                rc = sum(rflags)
+                                if w and rc != self.buffer.n_reader:
+                                    block_status.append(
+                                        f"blk{bi}:w={w},rc={rc}/{self.buffer.n_reader},"
+                                        f"flags={rflags}")
+                        occupied = len(block_status)
                         logger.info(
-                            long_wait_time_msg(VLLM_RINGBUFFER_WARNING_INTERVAL)
+                            "%s. cur_idx=%d, occupied=%d/%d, "
+                            "samples: %s",
+                            long_wait_time_msg(
+                                VLLM_RINGBUFFER_WARNING_INTERVAL),
+                            self.current_idx,
+                            occupied,
+                            self.buffer.max_chunks,
+                            "; ".join(block_status[:5]),
                         )
                         n_warning += 1
 

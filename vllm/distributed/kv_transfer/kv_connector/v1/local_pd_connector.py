@@ -898,45 +898,44 @@ class LocalPDConnector(KVConnectorBase_V1):
                 stacked.contiguous(), dim=0
             )
 
-            # Only rank_0 reconstructs
-            if cp_rank == 0:
-                tokens_per_layer = local_tensors[0].shape[0]
-                num_layers = len(layer_names)
-                W = self._cp_world_size
+            # All ranks reconstruct so any rank can serve decode
+            tokens_per_layer = local_tensors[0].shape[0]
+            num_layers = len(layer_names)
+            W = self._cp_world_size
 
-                # Split gathered back into per-rank, per-layer chunks
-                # gathered shape: [W * num_layers * N, D]
-                # Layout: [rank0_layer0, rank0_layer1, ..., rank0_layerN,
-                #          rank1_layer0, ..., rankW_layerN]
-                for layer_idx, layer_name in enumerate(layer_names):
-                    # Collect this layer's data from each rank
-                    layer_chunks = []
-                    for r in range(W):
-                        start = (r * num_layers + layer_idx) * tokens_per_layer
-                        end = start + tokens_per_layer
-                        layer_chunks.append(gathered[start:end])
+            # Split gathered back into per-rank, per-layer chunks
+            # gathered shape: [W * num_layers * N, D]
+            # Layout: [rank0_layer0, rank0_layer1, ..., rank0_layerN,
+            #          rank1_layer0, ..., rankW_layerN]
+            for layer_idx, layer_name in enumerate(layer_names):
+                # Collect this layer's data from each rank
+                layer_chunks = []
+                for r in range(W):
+                    start = (r * num_layers + layer_idx) * tokens_per_layer
+                    end = start + tokens_per_layer
+                    layer_chunks.append(gathered[start:end])
 
-                    layer_gathered = torch.cat(layer_chunks, dim=0)
+                layer_gathered = torch.cat(layer_chunks, dim=0)
 
-                    # Apply DualChunkSwap restore
-                    if restore_idx is not None and restore_idx.shape[0] > 0:
-                        total = layer_gathered.shape[0]
-                        ri = restore_idx[:total].to(layer_gathered.device)
-                        ri = torch.clamp(ri, 0, total - 1)
-                        layer_gathered = layer_gathered[ri]
+                # Apply DualChunkSwap restore
+                if restore_idx is not None and restore_idx.shape[0] > 0:
+                    total = layer_gathered.shape[0]
+                    ri = restore_idx[:total].to(layer_gathered.device)
+                    ri = torch.clamp(ri, 0, total - 1)
+                    layer_gathered = layer_gathered[ri]
 
-                    # Accumulate: append to existing buffer (chunked prefill)
-                    existing = self._gpu_kv_buffer.get(prefix, {}).get(
-                        layer_name
+                # Accumulate: append to existing buffer (chunked prefill)
+                existing = self._gpu_kv_buffer.get(prefix, {}).get(
+                    layer_name
+                )
+                if existing is not None:
+                    layer_gathered = torch.cat(
+                        [existing, layer_gathered], dim=0
                     )
-                    if existing is not None:
-                        layer_gathered = torch.cat(
-                            [existing, layer_gathered], dim=0
-                        )
 
-                    self._gpu_kv_buffer.setdefault(prefix, {})[layer_name] = (
-                        layer_gathered
-                    )
+                self._gpu_kv_buffer.setdefault(prefix, {})[layer_name] = (
+                    layer_gathered
+                )
 
         self._pending_local_kv.clear()
         self._pending_restore_idx = None
