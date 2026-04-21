@@ -440,6 +440,8 @@ class MLACommonMetadata(Generic[D]):
     pcp_allgather_restore_idx: torch.Tensor | None = None
     num_dycp_reqs: int = 0
     num_dycp_tokens: int = 0
+    dycp_full_slot_mapping: torch.Tensor | None = None
+    dycp_real_token_indices: torch.Tensor | None = None
 
     # Pre-split metadata for mixed DyCP+DP batches.
     # Built once in build(), reused across all layers in forward().
@@ -1677,6 +1679,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             decode=decode_metadata,
             pcp_allgather_restore_idx=pcp_allgather_restore_idx,
             num_dycp_reqs=num_dycp_reqs,
+            dycp_full_slot_mapping=(
+                common_attn_metadata.dycp_full_slot_mapping
+            ),
+            dycp_real_token_indices=(
+                common_attn_metadata.dycp_real_token_indices
+            ),
             num_dycp_tokens=num_dycp_tokens,
         )
 
@@ -1733,6 +1741,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 pcp_allgather_restore_idx=pcp_allgather_restore_idx,
                 num_dycp_reqs=n_dycp_prefill,
                 num_dycp_tokens=dycp_token_end,
+                dycp_full_slot_mapping=(
+                    common_attn_metadata.dycp_full_slot_mapping
+                ),
+                dycp_real_token_indices=(
+                    common_attn_metadata.dycp_real_token_indices
+                ),
             )
 
             attn_metadata._dp_split = self.metadata_cls(
@@ -3198,6 +3212,28 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             )
             dycp_kv_gathered = True
 
+            # ---- DyCP cache refill ----
+            # PCP splitting doesn't match the interleave pattern, so each
+            # rank is missing KV for positions it owns but another rank
+            # processed.  Write the allgathered KV to fill gaps.
+            _fs = attn_metadata.dycp_full_slot_mapping
+            if _fs is not None and kv_cache.numel() > 0:
+                _n = _fs.shape[0]
+                _rti = attn_metadata.dycp_real_token_indices
+                if _rti is not None and _rti.shape[0] >= _n:
+                    _kc = torch.index_select(k_c_normed, 0, _rti[:_n])
+                    _kp = torch.index_select(k_pe, 0, _rti[:_n])
+                else:
+                    _kc = k_c_normed[:_n]
+                    _kp = k_pe[:_n]
+                ops.concat_and_cache_mla(
+                    _kc,
+                    _kp.squeeze(1),
+                    kv_cache,
+                    _fs,
+                    kv_cache_dtype=self.kv_cache_dtype,
+                    scale=layer._k_scale,
+                )
 
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output

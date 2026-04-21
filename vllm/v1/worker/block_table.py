@@ -113,6 +113,14 @@ class BlockTable:
 
         self.cp_kv_cache_interleave_size = cp_kv_cache_interleave_size
 
+        # Buffer for DyCP prefill cache repair — covers all original
+        # (pre-PCP-split) DyCP positions.
+        # Size = post-split budget × CP world_size = pre-split upper bound.
+        self.dycp_full_slot_mapping = self._make_buffer(
+            self.max_num_batched_tokens * self.total_cp_world_size,
+            dtype=torch.int64,
+        )
+
     def append_row(
         self,
         block_ids: list[int],
@@ -248,18 +256,29 @@ class BlockTable:
             if total_cp_world_size > 1:
                 # Use DCP calculation for dycp requests
                 virtual_block_size = self.block_size * total_cp_world_size
+                block_idx = dycp_positions // virtual_block_size
                 block_table_indices = (
                     dycp_req_indices * self.max_num_blocks_per_req
-                    + dycp_positions // virtual_block_size
+                    + block_idx
                 )
-
-                block_numbers = self.block_table.np.ravel()[block_table_indices]
+                # Guard against unallocated block table entries
+                # (e.g. during CUDA graph capture with dummy data).
+                allocated = block_idx < self.num_blocks_per_row[
+                    dycp_req_indices]
+                safe_bt_indices = np.where(
+                    allocated, block_table_indices, 0)
+                block_numbers = np.where(
+                    allocated,
+                    self.block_table.np.ravel()[safe_bt_indices],
+                    0,
+                )
                 virtual_block_offsets = dycp_positions % virtual_block_size
                 mask = (
-                    virtual_block_offsets
-                    // self.cp_kv_cache_interleave_size
-                    % total_cp_world_size
-                    == total_cp_rank
+                    allocated
+                    & (virtual_block_offsets
+                       // self.cp_kv_cache_interleave_size
+                       % total_cp_world_size
+                       == total_cp_rank)
                 )
                 block_offsets = (
                     virtual_block_offsets
@@ -288,6 +307,74 @@ class BlockTable:
             )
         # Write final slots
         self.slot_mapping.np[:num_tokens] = slot_mapping_result
+
+    def compute_dycp_full_slot_mapping(
+        self,
+        num_dycp_reqs: int,
+        num_computed_tokens_cpu: np.ndarray,
+        original_num_scheduled_tokens: np.ndarray,
+    ) -> int:
+        """Compute slot_mapping for ALL original DyCP positions
+        (pre-PCP-split).
+
+        After DyCP prefill with PCP, each rank's cache may be missing
+        KV entries for positions it owns but that were processed by
+        another rank.  This mapping covers every original position so
+        that the allgathered KV can be written to fill those gaps.
+        Returns the total number of tokens mapped.
+        """
+        total_cp_world_size = self.total_cp_world_size
+        total_cp_rank = self.total_cp_rank
+
+        orig = original_num_scheduled_tokens[:num_dycp_reqs]
+        req_indices = np.repeat(
+            np.arange(num_dycp_reqs, dtype=np.int32), orig,
+        )
+        offsets = np.concatenate(
+            [np.arange(n, dtype=np.int32) for n in orig]
+        ) if num_dycp_reqs > 0 else np.array([], dtype=np.int32)
+        positions = num_computed_tokens_cpu[req_indices] + offsets
+        num_full = int(positions.shape[0])
+
+        if num_full == 0:
+            return 0
+
+        virtual_block_size = self.block_size * total_cp_world_size
+        block_idx = positions // virtual_block_size
+        block_table_indices = (
+            req_indices * self.max_num_blocks_per_req + block_idx
+        )
+        # Only access block table entries within allocated range.
+        # Unallocated entries contain garbage from torch.empty.
+        allocated = block_idx < self.num_blocks_per_row[req_indices]
+        # Zero out invalid indices to avoid out-of-bounds read,
+        # and force block_numbers=0 for unallocated (mask will set -1).
+        safe_bt_indices = np.where(allocated, block_table_indices, 0)
+        block_numbers = np.where(
+            allocated,
+            self.block_table.np.ravel()[safe_bt_indices],
+            0,
+        )
+        virtual_block_offsets = positions % virtual_block_size
+        mask = (
+            allocated
+            & (virtual_block_offsets
+               // self.cp_kv_cache_interleave_size
+               % total_cp_world_size
+               == total_cp_rank)
+        )
+        block_offsets = (
+            virtual_block_offsets
+            // (total_cp_world_size * self.cp_kv_cache_interleave_size)
+            * self.cp_kv_cache_interleave_size
+            + virtual_block_offsets % self.cp_kv_cache_interleave_size
+        )
+        slots = block_numbers * self.block_size + block_offsets
+        self.dycp_full_slot_mapping.np[:num_full] = np.where(
+            mask, slots, -1
+        )
+        self.dycp_full_slot_mapping.copy_to_gpu(num_full)
+        return num_full
 
     def commit_block_table(self, num_reqs: int) -> None:
         self.block_table.copy_to_gpu(num_reqs)

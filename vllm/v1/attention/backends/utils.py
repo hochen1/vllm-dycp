@@ -3,6 +3,7 @@
 import abc
 import enum
 import functools
+import hashlib
 from abc import abstractmethod
 from dataclasses import dataclass, field, fields, make_dataclass
 from typing import (
@@ -115,6 +116,14 @@ class CommonAttentionMetadata:
 
     num_dycp_reqs: int = 0
     num_dycp_tokens: int = 0
+
+    dycp_full_slot_mapping: torch.Tensor | None = None
+    """Slot mapping for all original (pre-PCP-split) DyCP positions.
+    Used to refill cache after KV allgather in DyCP prefill."""
+
+    dycp_real_token_indices: torch.Tensor | None = None
+    """Indices of real (non-padding) tokens in the restored allgathered
+    buffer. Used to extract real KV entries for cache write."""
 
     @property
     @deprecated(
@@ -351,6 +360,8 @@ def slice_common_attn_metadata(
     sliced.pcp_allgather_restore_idx = pcp_allgather_restore_idx
     sliced.num_dycp_reqs = num_dycp_reqs
     sliced.num_dycp_tokens = num_dycp_tokens
+    sliced.dycp_full_slot_mapping = attn_metadata.dycp_full_slot_mapping
+    sliced.dycp_real_token_indices = attn_metadata.dycp_real_token_indices
     return sliced
 
 
@@ -1458,6 +1469,16 @@ def get_pcp_kv_indices(
 
 
 
+def _deterministic_hash(req_id: str) -> int:
+    """Return a deterministic hash for a request ID.
+
+    Python's built-in ``hash()`` is randomised across processes
+    (PYTHONHASHSEED), so we use MD5 to guarantee the same ordering on
+    every rank / process.
+    """
+    return int(hashlib.md5(req_id.encode("utf-8")).hexdigest(), 16)
+
+
 def reorder_batch_to_split_cp_and_normal(
     input_batch: "InputBatch",
     scheduler_output: "SchedulerOutput",
@@ -1466,6 +1487,9 @@ def reorder_batch_to_split_cp_and_normal(
 
     The final order is a stable partition of the current batch:
     [cp0, cp1, ..., ncp0, ncp1, ...].
+
+    Within the CP group, requests are further sorted by a deterministic
+    hash of their request ID so that all ranks agree on the same order.
     """
     req_ids = input_batch.req_ids
     num_reqs = len(req_ids)
@@ -1479,6 +1503,10 @@ def reorder_batch_to_split_cp_and_normal(
         for idx, req_id in enumerate(req_ids)
         if scheduler_output.cp_rank_scheduled_tokens[req_id] <= 1
     ]
+
+    # Sort CP requests by deterministic hash so every rank sees the same order.
+    cp_indices.sort(key=lambda idx: _deterministic_hash(req_ids[idx]))
+
     target_order = cp_indices + ncp_indices
 
     if target_order == list(range(num_reqs)):

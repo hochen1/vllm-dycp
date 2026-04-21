@@ -1500,12 +1500,18 @@ class GPUModelRunner(
             # (1 token per CP request, no PCP splitting).
             num_dycp_tokens = int(sum(num_scheduled_tokens[:num_cp_request])) if num_cp_request > 0 else 0
             if num_cp_request > 0 and dycp_has_prefill:
+                # Save original token counts before PCP splits them.
+                self._dycp_orig_scheduled = (
+                    num_scheduled_tokens[:num_cp_request].copy()
+                )
                 num_scheduled_tokens[:num_cp_request], pcp_positions = (
                     self.pcp_manager.update_tokens_for_pcp(
                         num_scheduled_tokens[:num_cp_request],
                         self.arange_np,
                         scheduler_output.num_cp_request,
-                        self.reorder_batch_threshold,
+                        self.reorder_batch_threshold
+                        if self.reorder_batch_threshold is not None
+                        else 1,
                     )
                 )
 
@@ -1627,6 +1633,22 @@ class GPUModelRunner(
 
         if self.dycp_world_size > 1:
             self.input_batch.block_table.compute_domain_slot_mapping(req_indices, positions_np, scheduler_output.num_cp_request)
+            # Compute full slot_mapping for DyCP prefill cache repair.
+            if dycp_has_prefill and scheduler_output.num_cp_request > 0:
+                self._dycp_full_slot_len = (
+                    self.input_batch.block_table[0]
+                    .compute_dycp_full_slot_mapping(
+                        num_dycp_reqs=scheduler_output.num_cp_request,
+                        num_computed_tokens_cpu=(
+                            self.input_batch.num_computed_tokens_cpu
+                        ),
+                        original_num_scheduled_tokens=(
+                            self._dycp_orig_scheduled
+                        ),
+                    )
+                )
+            else:
+                self._dycp_full_slot_len = 0
         else:
             self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
 
@@ -1962,6 +1984,51 @@ class GPUModelRunner(
                 cm_base.pcp_allgather_restore_idx = self.pcp_manager.pcp_allgather_restore_idx.gpu[
                     :dycp_allgather_size
                 ]
+                # Attach full slot_mapping for cache repair.
+                fslen = getattr(self, '_dycp_full_slot_len', 0)
+                if fslen > 0:
+                    cm_base.dycp_full_slot_mapping = (
+                        self.input_batch.block_table[0]
+                        .dycp_full_slot_mapping.gpu[:fslen]
+                    )
+                    # Compute indices of real (non-padding) tokens in the
+                    # restored allgathered buffer — pure math, no comms.
+                    # DualChunkSwap assigns ALL padding to rank 0 (the
+                    # last chunk always goes to rank 0's tail portion).
+                    orig_counts = self._dycp_orig_scheduled
+                    pad_counts = self.pcp_manager.num_pcp_pads_cpu[
+                        :len(orig_counts)
+                    ]
+                    padded_counts = orig_counts + pad_counts
+                    pcp_per_rank = padded_counts // self.dycp_world_size
+                    masks = []
+                    for r in range(self.dycp_world_size):
+                        rank_parts = []
+                        for i in range(len(orig_counts)):
+                            n_total = int(pcp_per_rank[i])
+                            # Rank 0 gets ALL padding; other ranks: 0.
+                            n_pad = int(pad_counts[i]) if r == 0 else 0
+                            n_real = n_total - n_pad
+                            rank_parts.append(
+                                np.ones(n_real, dtype=np.bool_))
+                            if n_pad > 0:
+                                rank_parts.append(
+                                    np.zeros(n_pad, dtype=np.bool_))
+                        masks.append(np.concatenate(rank_parts))
+                    full_mask = np.concatenate(masks)
+                    restore_idx_np = (
+                        self.pcp_manager
+                        .pcp_allgather_restore_idx.np[
+                            :len(full_mask)
+                        ]
+                    )
+                    restored_mask = full_mask[restore_idx_np]
+                    real_indices_np = np.nonzero(restored_mask)[0]
+                    cm_base.dycp_real_token_indices = (
+                        torch.from_numpy(
+                            real_indices_np.astype(np.int64)
+                        ).to(self.device)
+                    )
 
             self.cp_local_seq_lens.cpu[num_dycp_reqs:num_reqs].copy_(self.seq_lens.cpu[num_dycp_reqs:num_reqs])
             self.cp_local_seq_lens.cpu[num_reqs:].fill_(0)
