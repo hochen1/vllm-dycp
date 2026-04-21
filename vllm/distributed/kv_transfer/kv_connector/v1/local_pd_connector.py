@@ -303,6 +303,8 @@ class LocalPDConnector(KVConnectorBase_V1):
             self._remote_ipc_info: dict[int, dict[str, tuple]] = {}
             self._local_kv_caches: dict[str, torch.Tensor] = {}
             self._ipc_initialized: bool = False
+            self._ipc_stream = None  # dedicated CUDA stream for async IPC
+            self._ipc_pending_sync: bool = False  # True if IPC copy in flight
             # IPC: prefill req_ids whose blocks are ready to free
             self._ipc_finished_sending: set[str] = set()
 
@@ -388,10 +390,20 @@ class LocalPDConnector(KVConnectorBase_V1):
                     remote_ptr, kv_tensor.shape, kv_tensor.dtype, elem_size,
                 )
 
+        # Create dedicated CUDA stream for async IPC transfers
+        stream_ptr = ctypes.c_void_p()
+        self._cuda_lib.CUDART_CHECK(
+            self._cuda_lib.funcs["cudaStreamCreate"](
+                ctypes.byref(stream_ptr)
+            )
+        )
+        self._ipc_stream = stream_ptr
+
         self._ipc_initialized = True
         elapsed = (_time.monotonic() - t0) * 1000
         logger.info(
-            "IPC handles exchanged: %d layers x %d ranks in %.1fms",
+            "IPC handles exchanged: %d layers x %d ranks in %.1fms "
+            "(async stream created)",
             len(kv_caches), world_size, elapsed,
         )
 
@@ -940,7 +952,8 @@ class LocalPDConnector(KVConnectorBase_V1):
 
         is_mla = None
         layers_injected = 0
-        cudamemcpy_fn = self._cuda_lib.funcs["cudaMemcpy"]
+        cudamemcpy_fn = self._cuda_lib.funcs["cudaMemcpyAsync"]
+        ipc_stream = self._ipc_stream
 
         for layer_name, layer in forward_context.no_compile_layers.items():
             kv_cache_attr = getattr(layer, "kv_cache", None)
@@ -990,6 +1003,7 @@ class LocalPDConnector(KVConnectorBase_V1):
                                 ),
                                 ctypes.c_size_t(block_bytes),
                                 ctypes.c_int(4),  # cudaMemcpyDefault
+                                ipc_stream,
                             )
                         )
                     else:
@@ -1018,12 +1032,16 @@ class LocalPDConnector(KVConnectorBase_V1):
                                     ),
                                     ctypes.c_size_t(block_bytes),
                                     ctypes.c_int(4),
+                                    ipc_stream,
                                 )
                             )
 
             layers_injected += 1
 
-        torch.cuda.synchronize()
+        # Don't synchronize here — let IPC copies run on ipc_stream
+        # in parallel with embedding/other compute on default stream.
+        # wait_for_layer_load() will synchronize before first attention layer.
+        self._ipc_pending_sync = True
 
         # Mark prefill blocks as ready to free (IPC copy done)
         prefill_req_id = meta.get("prefill_req_id")
@@ -1092,7 +1110,14 @@ class LocalPDConnector(KVConnectorBase_V1):
         )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        return
+        """Synchronize IPC stream before first attention layer needs KV."""
+        if self._ipc_pending_sync and self._ipc_stream is not None:
+            self._cuda_lib.CUDART_CHECK(
+                self._cuda_lib.funcs["cudaStreamSynchronize"](
+                    self._ipc_stream
+                )
+            )
+            self._ipc_pending_sync = False
 
     def save_kv_layer(
         self,
