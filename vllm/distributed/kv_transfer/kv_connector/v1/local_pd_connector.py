@@ -21,6 +21,7 @@ KNOWN LIMITATION (v1):
   outputs with and without PD separation.
 """
 
+import ctypes
 import json
 import os
 import re
@@ -28,6 +29,7 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
+import numpy as np
 import safetensors.torch
 import torch
 
@@ -112,6 +114,8 @@ class LocalPDConnectorMetadata(KVConnectorMetadata):
     requests: list[LocalPDReqMeta] = field(default_factory=list)
     cp_rank: int = 0
     has_store_requests: bool = False
+    # IPC metadata: {prefix: {per_rank_block_ids, interleave_size, ...}}
+    ipc_prefill_metas: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def add_request(
         self,
@@ -276,6 +280,7 @@ class LocalPDConnector(KVConnectorBase_V1):
             "shared_storage_path", "/tmp/kv_cache"
         )
         self._cp_world_size = vllm_config.parallel_config.dp_per_domain
+        self._interleave_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
 
         if role == KVConnectorRole.SCHEDULER:
             self._cross_requests_need_load: list[dict[str, "Request"]] = [
@@ -284,19 +289,110 @@ class LocalPDConnector(KVConnectorBase_V1):
             self._prefill_requests: dict[str, dict[str, Any]] = {}
             # In-memory flags for GPU buffer mode (no file I/O)
             self._completed_prefills: dict[str, dict[str, Any]] = {}
+            # IPC: {prefix: prefill_request_id} for delayed block freeing
+            self._ipc_delayed_prefill_ids: dict[str, str] = {}
 
         if role == KVConnectorRole.WORKER:
-            # GPU memory buffer: {prefix: {layer_name: tensor}}
-            # Keeps all-gathered KV on GPU between prefill and decode.
+            # Legacy state (used when IPC is not available)
             self._gpu_kv_buffer: dict[str, dict[str, torch.Tensor]] = {}
-            # Pending local KV to be batch-all-gathered in wait_for_save
             self._pending_local_kv: dict[str, list[tuple[str, torch.Tensor]]] = {}
             self._pending_cp_rank: int = 0
+            # IPC state (populated in register_kv_caches)
+            self._cuda_lib = None
+            # {src_rank: {layer_name: (remote_ptr, shape, dtype, elem_size)}}
+            self._remote_ipc_info: dict[int, dict[str, tuple]] = {}
+            self._local_kv_caches: dict[str, torch.Tensor] = {}
+            self._ipc_initialized: bool = False
+            # IPC: prefill req_ids whose blocks are ready to free
+            self._ipc_finished_sending: set[str] = set()
 
         logger.info(
             "LocalPDConnector initialized: storage_path=%s, "
             "cp_world_size=%d, block_size=%d",
             self._storage_path, self._cp_world_size, self._block_size,
+        )
+
+    # ==============================
+    # IPC Handle Exchange
+    # ==============================
+
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        """Exchange IPC handles for paged buffer tensors across CP ranks.
+
+        Called once during worker initialization after paged buffers are
+        allocated. Each rank gets IPC pointers to all other ranks' paged
+        buffers, enabling single-sided reads during decode.
+        """
+        self._local_kv_caches = kv_caches
+
+        if self._cp_world_size <= 1:
+            logger.info("IPC skipped: cp_world_size=%d", self._cp_world_size)
+            return
+
+        if os.environ.get("VLLM_DYCP_USE_IPC", "1") == "0":
+            logger.info("IPC disabled via VLLM_DYCP_USE_IPC=0")
+            return
+
+        import time as _time
+        t0 = _time.monotonic()
+
+        from vllm.distributed.device_communicators.cuda_wrapper import (
+            CudaRTLibrary,
+            cudaIpcMemHandle_t,
+        )
+        from vllm.distributed.parallel_state import get_dycp_group
+
+        dycp_group = get_dycp_group()
+        my_rank = dycp_group.rank_in_group
+        world_size = dycp_group.world_size
+
+        self._cuda_lib = CudaRTLibrary()
+
+        # For each layer, get local IPC handle and exchange with all ranks
+        layer_handles: dict[str, list[bytes]] = {}
+
+        for layer_name, kv_tensor in kv_caches.items():
+            handle = self._cuda_lib.cudaIpcGetMemHandle(
+                ctypes.c_void_p(kv_tensor.data_ptr())
+            )
+            handle_bytes = bytes(handle)
+
+            # All-to-all handle exchange via sequential broadcasts
+            all_handles: list[bytes | None] = [None] * world_size
+            all_handles[my_rank] = handle_bytes
+            for src in range(world_size):
+                obj_list = [all_handles[src]]
+                dycp_group.broadcast_object_list(obj_list, src=src)
+                all_handles[src] = obj_list[0]
+
+            layer_handles[layer_name] = all_handles  # type: ignore[assignment]
+
+        # Open remote handles and store raw pointers + metadata
+        for layer_name, kv_tensor in kv_caches.items():
+            elem_size = kv_tensor.element_size()
+            for src_rank in range(world_size):
+                if src_rank == my_rank:
+                    continue
+
+                handle_bytes = layer_handles[layer_name][src_rank]
+                handle = cudaIpcMemHandle_t()
+                ctypes.memmove(
+                    ctypes.byref(handle), handle_bytes, 128
+                )
+                remote_ptr = self._cuda_lib.cudaIpcOpenMemHandle(handle)
+
+                # Store raw pointer + metadata for cudaMemcpy at load time
+                self._remote_ipc_info.setdefault(
+                    src_rank, {}
+                )[layer_name] = (
+                    remote_ptr, kv_tensor.shape, kv_tensor.dtype, elem_size,
+                )
+
+        self._ipc_initialized = True
+        elapsed = (_time.monotonic() - t0) * 1000
+        logger.info(
+            "IPC handles exchanged: %d layers x %d ranks in %.1fms",
+            len(kv_caches), world_size, elapsed,
         )
 
     # ==============================
@@ -331,6 +427,24 @@ class LocalPDConnector(KVConnectorBase_V1):
 
             # Check in-memory flag first (GPU buffer mode)
             meta = self._completed_prefills.get(prefix)
+            if meta is None:
+                # Reconstruct from decode request's kv_transfer_params
+                # (proxy-mediated flow: metadata arrives with the request)
+                if kv_params.get("per_rank_block_ids"):
+                    meta = {
+                        "completed": True,
+                        "per_rank_block_ids": kv_params["per_rank_block_ids"],
+                        "num_prompt_tokens": kv_params.get("num_prompt_tokens", 0),
+                        "cp_world_size": kv_params.get("cp_world_size", 1),
+                        "interleave_size": kv_params.get("interleave_size", self._interleave_size),
+                        "block_size": self._block_size,
+                        "pd_request_prefix": prefix,
+                    }
+                    self._completed_prefills[prefix] = meta
+                    logger.info(
+                        "Reconstructed prefill meta from kv_params "
+                        "for prefix=%s", prefix,
+                    )
             if meta is None:
                 # Fallback: check file (for backward compatibility)
                 meta_path = os.path.join(
@@ -449,6 +563,10 @@ class LocalPDConnector(KVConnectorBase_V1):
                     is_store=False,
                     pd_request_prefix=pd_prefix,
                 )
+                # Attach IPC metadata for worker-side KV loading
+                prefill_meta = self._completed_prefills.get(pd_prefix)
+                if prefill_meta:
+                    meta.ipc_prefill_metas[pd_prefix] = prefill_meta
                 total_need_load += 1
             else:
                 # Prefill request: save KV to files.
@@ -576,6 +694,9 @@ class LocalPDConnector(KVConnectorBase_V1):
                 is_store=False,
                 pd_request_prefix=pd_prefix,
             )
+            prefill_meta = self._completed_prefills.get(pd_prefix)
+            if prefill_meta:
+                meta.ipc_prefill_metas[pd_prefix] = prefill_meta
             total_need_load += 1
 
         store_count = sum(1 for r in meta.requests if r.is_store)
@@ -601,7 +722,7 @@ class LocalPDConnector(KVConnectorBase_V1):
     def request_finished(
         self,
         request: "Request",
-        block_ids: list[int],
+        block_ids,
     ) -> tuple[bool, dict[str, Any] | None]:
         kv_params = request.kv_transfer_params
         if not kv_params:
@@ -615,12 +736,33 @@ class LocalPDConnector(KVConnectorBase_V1):
                 return False, None
 
             actual_cp_count = len(request.cp_ranks) if request.cp_ranks else 1
+
+            # Extract per-rank block_ids for IPC KV transfer.
+            # block_ids from CrossDPKVCacheManager.get_block_ids():
+            #   list[tuple[list[int], ...]], one tuple per CP rank
+            # For single kv_cache_group: block_ids[i][0] = list[int]
+            per_rank_block_ids = []
+            if isinstance(block_ids, list) and len(block_ids) > 0:
+                first = block_ids[0]
+                if isinstance(first, (list, tuple)) and len(first) > 0 and isinstance(first[0], (list, tuple)):
+                    # New format: list[tuple[list[int], ...]]
+                    per_rank_block_ids = [list(rank_blocks[0]) for rank_blocks in block_ids]
+                else:
+                    # Legacy format: single list[int] or tuple[list[int], ...]
+                    if isinstance(first, (list, tuple)):
+                        per_rank_block_ids = [list(first)]
+                    else:
+                        per_rank_block_ids = [list(block_ids)]
+
             meta = {
                 "completed": True,
                 "cp_world_size": actual_cp_count,
                 "num_prompt_tokens": len(request.prompt_token_ids),
                 "block_size": self._block_size,
                 "pd_request_prefix": prefix,
+                "per_rank_block_ids": per_rank_block_ids,
+                "interleave_size": self._interleave_size,
+                "prefill_req_id": request.request_id,
             }
 
             # Store in memory (no file I/O)
@@ -632,10 +774,12 @@ class LocalPDConnector(KVConnectorBase_V1):
 
             logger.info(
                 "Prefill finished for prefix=%s "
-                "(num_prompt_tokens=%d, cp_world_size=%d)",
+                "(num_prompt_tokens=%d, cp_world_size=%d, "
+                "per_rank_blocks=%s)",
                 prefix,
                 len(request.prompt_token_ids),
                 actual_cp_count,
+                [len(b) for b in per_rank_block_ids],
             )
 
             return_params = {
@@ -643,8 +787,21 @@ class LocalPDConnector(KVConnectorBase_V1):
                 "cp_world_size": actual_cp_count,
                 "num_prompt_tokens": len(request.prompt_token_ids),
                 "prompt_token_ids": list(request.prompt_token_ids),
+                "per_rank_block_ids": per_rank_block_ids,
+                "interleave_size": self._interleave_size,
             }
-            return False, return_params
+            # IPC mode: delay freeing prefill blocks until decode reads them.
+            # The worker's get_finished() returns finished_sending
+            # after start_load_kv completes IPC copy.
+            delay_free = actual_cp_count > 1
+            if delay_free:
+                self._ipc_delayed_prefill_ids[prefix] = request.request_id
+                return_params["prefill_req_id"] = request.request_id
+                logger.info(
+                    "Delaying block free for prefix=%s req=%s",
+                    prefix, request.request_id,
+                )
+            return delay_free, return_params
 
         if kv_params.get("do_remote_prefill"):
             # Decode finished: clean up in-memory metadata
@@ -677,16 +834,10 @@ class LocalPDConnector(KVConnectorBase_V1):
     def start_load_kv(
         self, forward_context: "ForwardContext", **kwargs: Any
     ) -> None:
-        """Load KV cache from files for decode requests."""
+        """Load KV cache for decode requests."""
         metadata = self._get_connector_metadata()
         if not isinstance(metadata, LocalPDConnectorMetadata):
             return
-
-        # Detect MLA by inspecting the KV cache layer shape.
-        # MLA: [num_pages, page_size, kv_dim] (3D)
-        # Non-MLA: [2, num_pages, page_size, kv_dim] (4D)
-        # We determine this from the first attention layer's cache.
-        is_mla = None  # Will be detected from layer shape
 
         for req_meta in metadata.requests:
             if req_meta.is_store:
@@ -694,68 +845,251 @@ class LocalPDConnector(KVConnectorBase_V1):
 
             prefix = req_meta.pd_request_prefix
 
-            # Check GPU buffer first (fast path)
-            import time as _time
-            _load_start = _time.monotonic() * 1000
-            kv_buf = self._gpu_kv_buffer.get(prefix)
-            if kv_buf is None:
-                logger.error(
-                    "No GPU KV buffer for prefix=%s", prefix
+            if self._ipc_initialized:
+                self._start_load_kv_ipc(
+                    req_meta, forward_context, prefix
                 )
+            else:
+                self._start_load_kv_legacy(
+                    req_meta, forward_context, prefix
+                )
+
+    def _start_load_kv_ipc(
+        self,
+        req_meta: LocalPDReqMeta,
+        forward_context: "ForwardContext",
+        prefix: str,
+    ) -> None:
+        """Load KV via CUDA IPC from remote ranks' paged buffers."""
+        import time as _time
+        t0 = _time.monotonic()
+
+        # Get IPC metadata from connector metadata (passed from scheduler)
+        connector_meta = self._get_connector_metadata()
+        if not isinstance(connector_meta, LocalPDConnectorMetadata):
+            logger.error("No connector metadata for IPC load")
+            return
+
+        meta = connector_meta.ipc_prefill_metas.get(prefix)
+        if meta is None:
+            logger.error("No IPC prefill metadata for prefix=%s", prefix)
+            return
+
+        per_rank_block_ids = meta.get("per_rank_block_ids")
+        if not per_rank_block_ids:
+            logger.error("No per_rank_block_ids for prefix=%s", prefix)
+            return
+
+        cp_world_size = meta.get("cp_world_size", self._cp_world_size)
+        block_size = self._block_size
+        interleave_size = meta.get("interleave_size", self._interleave_size)
+
+        from vllm.distributed.parallel_state import get_dycp_group
+        my_rank = get_dycp_group().rank_in_group
+
+        dst_slot_mapping = req_meta.slot_mapping
+        actual_tokens = dst_slot_mapping.shape[0]
+
+        # Compute interleave mapping: which src_rank owns each position
+        # and what slot in that rank's paged buffer holds the KV.
+        # Formula from block_table.py:238-250.
+        positions = np.arange(actual_tokens)
+        virtual_block_size = block_size * cp_world_size
+        virtual_block_offsets = positions % virtual_block_size
+
+        owning_ranks = (
+            virtual_block_offsets // interleave_size % cp_world_size
+        )
+        # Local block offset within the owning rank's paged buffer
+        local_block_offsets = (
+            virtual_block_offsets
+            // (cp_world_size * interleave_size)
+            * interleave_size
+            + virtual_block_offsets % interleave_size
+        )
+        # Which block (index) within the rank's allocation
+        block_indices = positions // virtual_block_size
+
+        # Group block copies by src_rank to minimize cudaMemcpy calls.
+        # For each src_rank, identify unique src_block -> dst_block pairs.
+        # Copy entire blocks (block_size * kv_dim * elem_size bytes each).
+        per_rank_copies: dict[int, list[tuple[int, int]]] = {}
+        for src_rank in range(cp_world_size):
+            rank_mask = owning_ranks == src_rank
+            if not np.any(rank_mask):
                 continue
 
-            actual_tokens = req_meta.slot_mapping.shape[0]
-            logger.info(
-                "Loading KV from GPU buffer for prefix=%s "
-                "(%d layers, %d tokens, load_start=%.1f)",
-                prefix, len(kv_buf), actual_tokens, _load_start,
+            rank_positions = np.where(rank_mask)[0]
+            src_block_ids_arr = np.array(per_rank_block_ids[src_rank])
+
+            rank_block_indices = block_indices[rank_positions]
+            rank_block_indices = np.clip(
+                rank_block_indices, 0,
+                max(len(src_block_ids_arr) - 1, 0),
             )
+            src_block_ids_actual = src_block_ids_arr[rank_block_indices]
+            dst_slots = dst_slot_mapping[rank_positions].numpy()
+            dst_block_ids_actual = dst_slots // block_size
 
-            import time as _time
-            _t0 = _time.monotonic()
+            # Unique (src_block, dst_block) pairs
+            pairs = set(zip(
+                src_block_ids_actual.tolist(),
+                dst_block_ids_actual.tolist(),
+            ))
+            per_rank_copies[src_rank] = sorted(pairs)
 
-            sm = req_meta.slot_mapping
-            layers_injected = 0
-            for layer_name, layer in forward_context.no_compile_layers.items():
-                kv_cache_attr = getattr(layer, "kv_cache", None)
-                if kv_cache_attr is None:
-                    continue
-                kv_cache_layer = kv_cache_attr[
-                    forward_context.virtual_engine
-                ]
+        is_mla = None
+        layers_injected = 0
+        cudamemcpy_fn = self._cuda_lib.funcs["cudaMemcpy"]
 
-                if is_mla is None:
-                    is_mla = kv_cache_layer.dim() == 3
+        for layer_name, layer in forward_context.no_compile_layers.items():
+            kv_cache_attr = getattr(layer, "kv_cache", None)
+            if kv_cache_attr is None:
+                continue
+            kv_cache_layer = kv_cache_attr[forward_context.virtual_engine]
 
-                full_kv = kv_buf.get(layer_name)
-                if full_kv is None:
-                    continue
+            if is_mla is None:
+                is_mla = kv_cache_layer.dim() == 3
 
-                # Inject: scatter KV into paged buffer
-                if is_mla:
-                    num_pages = kv_cache_layer.shape[0]
-                    page_size = kv_cache_layer.shape[1]
-                    flat = kv_cache_layer.reshape(
-                        num_pages * page_size, -1
-                    )
-                    flat[sm] = full_kv[:actual_tokens]
+            # Compute bytes per block for this layer
+            if is_mla:
+                # Shape: [num_pages, page_size, kv_dim]
+                kv_dim = kv_cache_layer.shape[2]
+                elem_size = kv_cache_layer.element_size()
+                slot_bytes = kv_dim * elem_size
+            else:
+                # Shape: [2, num_pages, page_size, kv_dim]
+                kv_dim = kv_cache_layer.shape[3]
+                elem_size = kv_cache_layer.element_size()
+                slot_bytes = kv_dim * elem_size
+                # For non-MLA, need to handle 2 (K+V) separately
+
+            block_bytes = block_size * slot_bytes
+            local_base_ptr = kv_cache_layer.data_ptr()
+
+            for src_rank, block_pairs in per_rank_copies.items():
+                if src_rank == my_rank:
+                    # Local rank: copy within same paged buffer
+                    src_base_ptr = local_base_ptr
                 else:
-                    num_pages = kv_cache_layer.shape[1]
-                    page_size = kv_cache_layer.shape[2]
-                    flat = kv_cache_layer.reshape(
-                        2, num_pages * page_size, -1
-                    )
-                    flat[:, sm] = full_kv[:, :actual_tokens]
-                layers_injected += 1
+                    ipc_info = self._remote_ipc_info[src_rank][layer_name]
+                    remote_ptr = ipc_info[0]
+                    src_base_ptr = remote_ptr.value
 
-            # Free GPU buffer
-            del self._gpu_kv_buffer[prefix]
+                for src_block, dst_block in block_pairs:
+                    if is_mla:
+                        src_offset = src_block * block_bytes
+                        dst_offset = dst_block * block_bytes
+                        self._cuda_lib.CUDART_CHECK(
+                            cudamemcpy_fn(
+                                ctypes.c_void_p(
+                                    local_base_ptr + dst_offset
+                                ),
+                                ctypes.c_void_p(
+                                    src_base_ptr + src_offset
+                                ),
+                                ctypes.c_size_t(block_bytes),
+                                ctypes.c_int(4),  # cudaMemcpyDefault
+                            )
+                        )
+                    else:
+                        # Non-MLA: [2, num_pages, page_size, kv_dim]
+                        # Copy K and V separately
+                        num_pages = kv_cache_layer.shape[1]
+                        plane_bytes = (
+                            num_pages * block_size * slot_bytes
+                        )
+                        for plane in range(2):
+                            src_offset = (
+                                plane * plane_bytes
+                                + src_block * block_bytes
+                            )
+                            dst_offset = (
+                                plane * plane_bytes
+                                + dst_block * block_bytes
+                            )
+                            self._cuda_lib.CUDART_CHECK(
+                                cudamemcpy_fn(
+                                    ctypes.c_void_p(
+                                        local_base_ptr + dst_offset
+                                    ),
+                                    ctypes.c_void_p(
+                                        src_base_ptr + src_offset
+                                    ),
+                                    ctypes.c_size_t(block_bytes),
+                                    ctypes.c_int(4),
+                                )
+                            )
 
-            _elapsed = (_time.monotonic() - _t0) * 1000
-            logger.info(
-                "KV injected for prefix=%s: %d layers in %.1fms",
-                prefix, layers_injected, _elapsed,
-            )
+            layers_injected += 1
+
+        torch.cuda.synchronize()
+
+        # Mark prefill blocks as ready to free (IPC copy done)
+        prefill_req_id = meta.get("prefill_req_id")
+        if prefill_req_id:
+            self._ipc_finished_sending.add(prefill_req_id)
+
+        elapsed = (_time.monotonic() - t0) * 1000
+        logger.info(
+            "IPC KV loaded for prefix=%s: %d layers, %d tokens "
+            "from %d ranks in %.1fms (prefill blocks freed: %s)",
+            prefix, layers_injected, actual_tokens,
+            cp_world_size, elapsed, prefill_req_id,
+        )
+
+    def _start_load_kv_legacy(
+        self,
+        req_meta: LocalPDReqMeta,
+        forward_context: "ForwardContext",
+        prefix: str,
+    ) -> None:
+        """Load KV from _gpu_kv_buffer (legacy all-gather path)."""
+        import time as _time
+
+        kv_buf = self._gpu_kv_buffer.get(prefix)
+        if kv_buf is None:
+            logger.error("No GPU KV buffer for prefix=%s", prefix)
+            return
+
+        actual_tokens = req_meta.slot_mapping.shape[0]
+        _t0 = _time.monotonic()
+
+        is_mla = None
+        sm = req_meta.slot_mapping
+        layers_injected = 0
+        for layer_name, layer in forward_context.no_compile_layers.items():
+            kv_cache_attr = getattr(layer, "kv_cache", None)
+            if kv_cache_attr is None:
+                continue
+            kv_cache_layer = kv_cache_attr[forward_context.virtual_engine]
+
+            if is_mla is None:
+                is_mla = kv_cache_layer.dim() == 3
+
+            full_kv = kv_buf.get(layer_name)
+            if full_kv is None:
+                continue
+
+            if is_mla:
+                num_pages = kv_cache_layer.shape[0]
+                page_size = kv_cache_layer.shape[1]
+                flat = kv_cache_layer.reshape(num_pages * page_size, -1)
+                flat[sm] = full_kv[:actual_tokens]
+            else:
+                num_pages = kv_cache_layer.shape[1]
+                page_size = kv_cache_layer.shape[2]
+                flat = kv_cache_layer.reshape(2, num_pages * page_size, -1)
+                flat[:, sm] = full_kv[:, :actual_tokens]
+            layers_injected += 1
+
+        del self._gpu_kv_buffer[prefix]
+
+        _elapsed = (_time.monotonic() - _t0) * 1000
+        logger.info(
+            "KV injected (legacy) for prefix=%s: %d layers in %.1fms",
+            prefix, layers_injected, _elapsed,
+        )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         return
@@ -802,11 +1136,17 @@ class LocalPDConnector(KVConnectorBase_V1):
             )
 
             if is_multi_cp:
-                self._save_kv_allgather_raw(
-                    layer_name, raw_kv_c_normed, raw_k_pe,
-                    attn_metadata, num_tokens,
-                    cp_rank, prefix,
-                )
+                if self._ipc_initialized:
+                    # IPC mode: KV is already in each rank's paged buffer
+                    # via the attention kernel. Decode reads via IPC.
+                    pass
+                else:
+                    # Legacy: buffer raw KV for batch all-gather
+                    self._save_kv_allgather_raw(
+                        layer_name, raw_kv_c_normed, raw_k_pe,
+                        attn_metadata, num_tokens,
+                        cp_rank, prefix,
+                    )
             else:
                 # Single CP rank: extract from paged buffer.
                 # Use attn_metadata.slot_mapping (works for all chunks)
@@ -873,7 +1213,15 @@ class LocalPDConnector(KVConnectorBase_V1):
             self._pending_restore_idx = restore_idx
 
     def wait_for_save(self):
-        """Batch all-gather all pending local KV across CP ranks."""
+        """Batch all-gather all pending local KV across CP ranks.
+
+        In IPC mode: no-op. KV stays in each rank's paged buffer.
+        In legacy mode: performs all-gather (backward compatibility).
+        """
+        if self._ipc_initialized and not self._pending_local_kv:
+            logger.info("wait_for_save: IPC mode, no-op (0ms)")
+            return
+
         if not self._pending_local_kv:
             return
 
@@ -946,15 +1294,32 @@ class LocalPDConnector(KVConnectorBase_V1):
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[set[str] | None, set[str] | None]:
-        """Report decode requests as finished receiving after KV load."""
+        """Report finished requests.
+
+        finished_sending: prefill req_ids whose IPC copy completed,
+            blocks can now be freed by the scheduler.
+        finished_recving: decode req_ids that finished loading KV.
+        """
         metadata = self._get_connector_metadata()
         if not isinstance(metadata, LocalPDConnectorMetadata):
             return None, None
 
-        # All load (decode) requests are synchronously loaded in
-        # start_load_kv, so report them all as finished receiving.
+        # finished_sending: prefill blocks ready to free after IPC read
+        finished_sending = None
+        if self._ipc_finished_sending:
+            finished_sending = self._ipc_finished_sending.copy()
+            self._ipc_finished_sending.clear()
+            logger.info(
+                "get_finished: releasing prefill blocks for %s",
+                finished_sending,
+            )
+
+        # finished_recving: decode requests done loading KV
         load_req_ids = {
             r.req_id for r in metadata.requests if not r.is_store
         }
 
-        return None, load_req_ids if load_req_ids else None
+        return (
+            finished_sending,
+            load_req_ids if load_req_ids else None,
+        )

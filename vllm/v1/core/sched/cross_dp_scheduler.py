@@ -365,6 +365,30 @@ class CrossDPScheduler(Scheduler):
     def has_finished_requests(self) -> bool:
         return sum(len(sub_ids) for sub_ids in self.finished_req_ids) > 0
 
+    def _update_from_kv_xfer_finished(self, kv_connector_output):
+        """Override to handle multi-rank deduplication.
+
+        With multiple CP ranks, the same finished_sending req_id may
+        arrive from multiple workers across scheduling steps. Guard
+        against double-free by checking self.requests before freeing.
+        """
+        if self.connector is not None:
+            self.connector.bind_connector_metadata(None)
+
+        for req_id in kv_connector_output.finished_recving or ():
+            logger.debug("Finished recving KV transfer for request %s",
+                         req_id)
+            self.finished_recving_kv_req_ids.add(req_id)
+        for req_id in kv_connector_output.finished_sending or ():
+            if req_id in self.requests:
+                logger.debug(
+                    "Finished sending KV transfer for request %s", req_id)
+                self._free_blocks(self.requests[req_id])
+            else:
+                logger.debug(
+                    "Skipping finished_sending for already-freed %s",
+                    req_id)
+
     def _connector_finished(
         self, request: Request
     ) -> tuple[bool, dict[str, Any] | None]:
@@ -385,7 +409,7 @@ class CrossDPScheduler(Scheduler):
             # Hybrid memory allocator should be already turned off for this
             # code path, but let's double-check here.
             assert len(self.kv_cache_config.kv_cache_groups) == 1
-            return self.connector.request_finished(request, block_ids[0])
+            return self.connector.request_finished(request, block_ids)
 
         return self.connector.request_finished_all_groups(request, block_ids)
     
