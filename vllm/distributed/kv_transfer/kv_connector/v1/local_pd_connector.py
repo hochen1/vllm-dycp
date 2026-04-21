@@ -304,7 +304,8 @@ class LocalPDConnector(KVConnectorBase_V1):
             self._local_kv_caches: dict[str, torch.Tensor] = {}
             self._ipc_initialized: bool = False
             self._ipc_stream = None  # dedicated CUDA stream for async IPC
-            self._ipc_pending_sync: bool = False  # True if IPC copy in flight
+            # {decode_req_id: (cuda_event, prefill_req_id)} async IPC tracking
+            self._ipc_pending_events: dict[str, tuple] = {}
             # IPC: prefill req_ids whose blocks are ready to free
             self._ipc_finished_sending: set[str] = set()
 
@@ -390,7 +391,7 @@ class LocalPDConnector(KVConnectorBase_V1):
                     remote_ptr, kv_tensor.shape, kv_tensor.dtype, elem_size,
                 )
 
-        # Create dedicated CUDA stream for async IPC transfers
+        # Create dedicated CUDA stream + event for async IPC transfers
         stream_ptr = ctypes.c_void_p()
         self._cuda_lib.CUDART_CHECK(
             self._cuda_lib.funcs["cudaStreamCreate"](
@@ -398,6 +399,14 @@ class LocalPDConnector(KVConnectorBase_V1):
             )
         )
         self._ipc_stream = stream_ptr
+
+        event_ptr = ctypes.c_void_p()
+        self._cuda_lib.CUDART_CHECK(
+            self._cuda_lib.funcs["cudaEventCreate"](
+                ctypes.byref(event_ptr)
+            )
+        )
+        self._ipc_event = event_ptr
 
         self._ipc_initialized = True
         elapsed = (_time.monotonic() - t0) * 1000
@@ -501,13 +510,10 @@ class LocalPDConnector(KVConnectorBase_V1):
                 "(aligned=%d, gap_from_prefill=%.1fms)",
                 prefix, num_prompt_tokens, aligned, _gap,
             )
-            # Use synchronous mode (False): the scheduler treats these
-            # tokens as already computed. The actual KV file loading
-            # happens in start_load_kv() during the forward pass.
-            # Async mode (True) would require WAITING_FOR_REMOTE_KVS
-            # state which needs a separate forward pass to trigger
-            # the connector's get_finished() — causing a deadlock
-            # in single-instance PD separation.
+            # Sync mode: request is scheduled normally. IPC copy runs
+            # on dedicated stream, GPU-level dependency via
+            # cudaStreamWaitEvent in wait_for_layer_load ensures KV
+            # is ready before attention. No CPU blocking.
             return ext_tokens, False
 
         if kv_params.get("do_remote_decode"):
@@ -1038,22 +1044,33 @@ class LocalPDConnector(KVConnectorBase_V1):
 
             layers_injected += 1
 
-        # Don't synchronize here — let IPC copies run on ipc_stream
-        # in parallel with embedding/other compute on default stream.
-        # wait_for_layer_load() will synchronize before first attention layer.
-        self._ipc_pending_sync = True
+        # Record event on IPC stream to track async completion.
+        # get_finished() polls cudaEventQuery to detect when done.
+        event_ptr = ctypes.c_void_p()
+        self._cuda_lib.CUDART_CHECK(
+            self._cuda_lib.funcs["cudaEventCreate"](
+                ctypes.byref(event_ptr)
+            )
+        )
+        self._cuda_lib.CUDART_CHECK(
+            self._cuda_lib.funcs["cudaEventRecord"](
+                event_ptr, self._ipc_stream
+            )
+        )
 
-        # Mark prefill blocks as ready to free (IPC copy done)
+        # Track: decode_req_id → (event, prefill_req_id)
         prefill_req_id = meta.get("prefill_req_id")
-        if prefill_req_id:
-            self._ipc_finished_sending.add(prefill_req_id)
+        decode_req_id = req_meta.req_id
+        self._ipc_pending_events[decode_req_id] = (
+            event_ptr, prefill_req_id,
+        )
 
         elapsed = (_time.monotonic() - t0) * 1000
         logger.info(
-            "IPC KV loaded for prefix=%s: %d layers, %d tokens "
-            "from %d ranks in %.1fms (prefill blocks freed: %s)",
+            "IPC KV async launched for prefix=%s: %d layers, %d tokens "
+            "from %d ranks in %.1fms (decode=%s, prefill=%s)",
             prefix, layers_injected, actual_tokens,
-            cp_world_size, elapsed, prefill_req_id,
+            cp_world_size, elapsed, decode_req_id, prefill_req_id,
         )
 
     def _start_load_kv_legacy(
@@ -1110,14 +1127,28 @@ class LocalPDConnector(KVConnectorBase_V1):
         )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        """Synchronize IPC stream before first attention layer needs KV."""
-        if self._ipc_pending_sync and self._ipc_stream is not None:
+        """GPU-level sync: make default stream wait for IPC event.
+
+        Uses cudaStreamWaitEvent — no CPU blocking. The GPU naturally
+        orders: IPC copies complete → then attention kernels run.
+        """
+        if not self._ipc_pending_events:
+            return
+        if getattr(self, '_ipc_gpu_synced', False):
+            return
+        # On first call, insert GPU-level wait for ALL pending IPC events.
+        # After this, default stream won't execute until IPC stream finishes.
+        for decode_req_id, (event, _) in self._ipc_pending_events.items():
+            default_stream = torch.cuda.current_stream().cuda_stream
             self._cuda_lib.CUDART_CHECK(
-                self._cuda_lib.funcs["cudaStreamSynchronize"](
-                    self._ipc_stream
+                self._cuda_lib.funcs["cudaStreamWaitEvent"](
+                    ctypes.c_void_p(default_stream),
+                    event,
+                    ctypes.c_uint(0),
                 )
             )
-            self._ipc_pending_sync = False
+        # Mark as synced — subsequent layer calls are no-op
+        self._ipc_gpu_synced = True
 
     def save_kv_layer(
         self,
@@ -1319,32 +1350,51 @@ class LocalPDConnector(KVConnectorBase_V1):
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[set[str] | None, set[str] | None]:
-        """Report finished requests.
+        """Poll CUDA events for IPC completion.
 
-        finished_sending: prefill req_ids whose IPC copy completed,
-            blocks can now be freed by the scheduler.
-        finished_recving: decode req_ids that finished loading KV.
+        finished_sending: prefill req_ids whose IPC copy is confirmed
+            done (blocks can be freed).
+        finished_recving: decode req_ids done loading (sync mode: all).
         """
         metadata = self._get_connector_metadata()
         if not isinstance(metadata, LocalPDConnectorMetadata):
             return None, None
 
-        # finished_sending: prefill blocks ready to free after IPC read
-        finished_sending = None
-        if self._ipc_finished_sending:
-            finished_sending = self._ipc_finished_sending.copy()
-            self._ipc_finished_sending.clear()
-            logger.info(
-                "get_finished: releasing prefill blocks for %s",
-                finished_sending,
-            )
+        finished_sending: set[str] = set()
 
-        # finished_recving: decode requests done loading KV
+        # Poll each pending IPC event (non-blocking cudaEventQuery)
+        if self._cuda_lib and self._ipc_pending_events:
+            event_query_fn = self._cuda_lib.funcs["cudaEventQuery"]
+            completed: list[str] = []
+            for decode_req_id, (event, prefill_req_id) in (
+                self._ipc_pending_events.items()
+            ):
+                result = event_query_fn(event)
+                if result == 0:  # cudaSuccess
+                    completed.append(decode_req_id)
+                    if prefill_req_id:
+                        finished_sending.add(prefill_req_id)
+            for did in completed:
+                del self._ipc_pending_events[did]
+            # Reset gpu sync flag for next batch
+            if completed:
+                self._ipc_gpu_synced = False
+                logger.info(
+                    "get_finished: IPC done, freeing prefill blocks %s",
+                    finished_sending,
+                )
+
+        # Also drain legacy finished_sending
+        if self._ipc_finished_sending:
+            finished_sending |= self._ipc_finished_sending
+            self._ipc_finished_sending.clear()
+
+        # finished_recving: sync mode, all load requests are done
         load_req_ids = {
             r.req_id for r in metadata.requests if not r.is_store
         }
 
         return (
-            finished_sending,
+            finished_sending if finished_sending else None,
             load_req_ids if load_req_ids else None,
         )

@@ -122,6 +122,31 @@ class CudaRTLibrary:
             cudaError_t,
             [ctypes.c_void_p],
         ),
+        # cudaError_t cudaEventCreate ( cudaEvent_t* event )
+        Function(
+            "cudaEventCreate",
+            cudaError_t,
+            [ctypes.POINTER(ctypes.c_void_p)],
+        ),
+        # cudaError_t cudaEventRecord ( cudaEvent_t event, cudaStream_t stream )
+        Function(
+            "cudaEventRecord",
+            cudaError_t,
+            [ctypes.c_void_p, ctypes.c_void_p],
+        ),
+        # cudaError_t cudaEventQuery ( cudaEvent_t event )
+        # Returns cudaSuccess (0) if done, cudaErrorNotReady (600) if not
+        Function(
+            "cudaEventQuery",
+            cudaError_t,
+            [ctypes.c_void_p],
+        ),
+        # cudaError_t cudaStreamWaitEvent ( cudaStream_t stream, cudaEvent_t event, unsigned int flags )
+        Function(
+            "cudaStreamWaitEvent",
+            cudaError_t,
+            [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint],
+        ),
     ]
 
     # https://rocm.docs.amd.com/projects/HIPIFY/en/latest/tables/CUDA_Runtime_API_functions_supported_by_HIP.html # noqa
@@ -139,6 +164,10 @@ class CudaRTLibrary:
         "cudaMemcpyAsync": "hipMemcpyAsync",
         "cudaStreamCreate": "hipStreamCreate",
         "cudaStreamSynchronize": "hipStreamSynchronize",
+        "cudaEventCreate": "hipEventCreate",
+        "cudaEventRecord": "hipEventRecord",
+        "cudaEventQuery": "hipEventQuery",
+        "cudaStreamWaitEvent": "hipStreamWaitEvent",
     }
 
     # class attribute to store the mapping from the path to the library
