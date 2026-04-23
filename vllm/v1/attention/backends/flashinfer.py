@@ -1075,8 +1075,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             has_sinks=self.has_sinks,
             has_spec=uses_spec_reorder,
         )
-        decode_use_trtllm = (
-            self.use_trtllm_decode_attention and (self.dcp_world_size * self.dycp_world_size) <= 1
+        decode_use_trtllm = self.use_trtllm_decode_attention and (
+            self.dcp_world_size <= 1
+            and (self.dycp_world_size <= 1
+                 or common_attn_metadata.num_dycp_reqs == 0)
         )
 
         if not (prefill_use_trtllm and decode_use_trtllm):
@@ -1675,7 +1677,7 @@ class FlashInferImpl(AttentionImpl):
                         is_lse_base_on_e=False,
                     )
 
-                elif self.dycp_world_size > 1:
+                elif self.dycp_world_size > 1 and attn_metadata.num_dycp_reqs > 0:
                     lse = torch.empty(
                         (decode_query.size(0), decode_query.size(1)),
                         dtype=torch.float32,
