@@ -490,14 +490,19 @@ class LocalPDConnector(KVConnectorBase_V1):
                 return None, False
 
             num_prompt_tokens = meta["num_prompt_tokens"]
-            # For PD separation, we want to load all prompt KV even
-            # if it doesn't fill a complete block. Use block-aligned
-            # token count but ensure at least 1 token is loaded.
-            aligned = align_to_block_size(num_prompt_tokens, self._block_size)
-            if aligned == 0 and num_prompt_tokens > 0:
-                # Prompt shorter than block_size: still load what we have.
-                # The scheduler will allocate 1 block for these tokens.
-                aligned = num_prompt_tokens - 1  # -1 because last token needs compute
+            # In PD separation, the prefill instance computes KV cache
+            # for ALL prompt tokens including the last block. Use
+            # num_prompt_tokens - 1 (not align_to_block_size) because:
+            # 1. align_to_block_size drops up to (block_size-1) tokens,
+            #    causing an extra prefill step for the remainder.
+            # 2. The last prompt token's KV is already computed by
+            #    prefill, so only 1 new token (first decode) is needed.
+            # The scheduler handles non-block-aligned num_computed_tokens
+            # correctly — block allocation uses num_new_tokens +
+            # num_external_computed_tokens which is still block-aligned.
+            aligned = num_prompt_tokens - 1
+            if aligned < 0:
+                aligned = 0
             ext_tokens = aligned - num_computed_tokens
             if ext_tokens <= 0:
                 return 0, False
