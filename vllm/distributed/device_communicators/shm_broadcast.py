@@ -278,11 +278,9 @@ class MessageQueue:
         # Default of 24MiB chosen to be large enough to accommodate grammar
         # bitmask tensors for large batches (1024 requests).
         max_chunk_bytes: int = 1024 * 1024 * 24,
-        max_chunks: int = -1,
+        max_chunks: int = 10,
         connect_ip: str | None = None,
     ):
-        if max_chunks < 0:
-            max_chunks = envs.VLLM_MQ_MAX_CHUNKS
         if local_reader_ranks is None:
             local_reader_ranks = list(range(n_local_reader))
         else:
@@ -466,27 +464,8 @@ class MessageQueue:
 
                     # if we wait for a long time, log a message
                     if elapsed > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning:
-                        # Diagnostic: scan all blocks to find leak
-                        block_status = []
-                        for bi in range(self.buffer.max_chunks):
-                            with self.buffer.get_metadata(bi) as mb:
-                                w = mb[0]
-                                rflags = [mb[j+1] for j in range(self.buffer.n_reader)]
-                                rc = sum(rflags)
-                                if w and rc != self.buffer.n_reader:
-                                    block_status.append(
-                                        f"blk{bi}:w={w},rc={rc}/{self.buffer.n_reader},"
-                                        f"flags={rflags}")
-                        occupied = len(block_status)
                         logger.info(
-                            "%s. cur_idx=%d, occupied=%d/%d, "
-                            "samples: %s",
-                            long_wait_time_msg(
-                                VLLM_RINGBUFFER_WARNING_INTERVAL),
-                            self.current_idx,
-                            occupied,
-                            self.buffer.max_chunks,
-                            "; ".join(block_status[:5]),
+                            long_wait_time_msg(VLLM_RINGBUFFER_WARNING_INTERVAL)
                         )
                         n_warning += 1
 

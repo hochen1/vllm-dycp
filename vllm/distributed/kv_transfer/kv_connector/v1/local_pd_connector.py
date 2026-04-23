@@ -1,15 +1,13 @@
 """
-LocalPDConnector: File-based KV connector for local Prefill-Decode separation.
+LocalPDConnector: KV connector for local Prefill-Decode separation.
 
 In local PD separation mode:
-- Prefill phase: each CP rank independently saves its KV slice to files
-- Decode phase: the single decode rank loads all KV slices and reconstructs
-  the full KV cache
+- Prefill phase: all CP ranks save KV to shared storage (IPC or GPU buffer)
+- Decode phase: the single decode rank loads KV and injects into paged cache
 
-File layout:
-  {storage_path}/{pd_request_prefix}/
-    meta.json              - metadata (cp_world_size, token ranges, etc.)
-    rank_{i}/layer_{j}.safetensors - per-rank, per-layer KV data
+Two KV transfer modes:
+1. CUDA IPC (default for multi-CP): direct GPU-to-GPU memcpy via IPC handles
+2. GPU buffer (fallback for single-CP): all-gather + in-memory buffer
 
 KNOWN LIMITATION (v1):
   KV reconstruction uses simple concatenation (torch.cat) which assumes
@@ -22,15 +20,12 @@ KNOWN LIMITATION (v1):
 """
 
 import ctypes
-import json
 import os
 import re
-import tempfile
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
-import safetensors.torch
 import torch
 
 from vllm.attention.backends.abstract import AttentionMetadata
@@ -159,24 +154,6 @@ def _extract_kv_from_layer(
     return kv_layer.reshape(2, num_pages * page_size, -1)[:, slot_mapping, ...]
 
 
-def _inject_kv_into_layer(
-    dst_kv_layer: torch.Tensor,
-    src_kv: torch.Tensor,
-    slot_mapping: torch.Tensor,
-    is_mla: bool,
-) -> None:
-    """Inject KV cache into paged buffer using slot_mapping."""
-    dst_shape = dst_kv_layer.shape
-    if is_mla:
-        num_pages, page_size = dst_shape[0], dst_shape[1]
-        dst_flat = dst_kv_layer.reshape(num_pages * page_size, -1)
-        dst_flat[slot_mapping, ...] = src_kv
-    else:
-        num_pages, page_size = dst_shape[1], dst_shape[2]
-        dst_flat = dst_kv_layer.reshape(2, num_pages * page_size, -1)
-        dst_flat[:, slot_mapping, ...] = src_kv
-
-
 def _compute_dualchunkswap_restore_idx(
     num_tokens: int,
     cp_world_size: int,
@@ -226,24 +203,6 @@ def _compute_dualchunkswap_restore_idx(
 def _validate_prefix(prefix: str) -> bool:
     """Validate prefix to prevent path traversal."""
     return bool(prefix and _VALID_PREFIX_RE.match(prefix))
-
-
-def _atomic_write_json(path: str, data: dict) -> None:
-    """Write JSON atomically using rename to prevent partial reads."""
-    dir_path = os.path.dirname(path)
-    os.makedirs(dir_path, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(dir=dir_path, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f)
-        os.replace(tmp_path, path)  # atomic on POSIX
-    except Exception:
-        # Clean up temp file on failure
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
 
 
 # ---------------------------------------------------------------------------
@@ -306,8 +265,6 @@ class LocalPDConnector(KVConnectorBase_V1):
             self._ipc_stream = None  # dedicated CUDA stream for async IPC
             # {decode_req_id: (cuda_event, prefill_req_id)} async IPC tracking
             self._ipc_pending_events: dict[str, tuple] = {}
-            # IPC: prefill req_ids whose blocks are ready to free
-            self._ipc_finished_sending: set[str] = set()
 
         logger.info(
             "LocalPDConnector initialized: storage_path=%s, "
@@ -467,24 +424,10 @@ class LocalPDConnector(KVConnectorBase_V1):
                         "for prefix=%s", prefix,
                     )
             if meta is None:
-                # Fallback: check file (for backward compatibility)
-                meta_path = os.path.join(
-                    self._storage_path, prefix, "meta.json"
+                logger.debug(
+                    "KV not ready for prefix=%s, will retry", prefix
                 )
-                if not os.path.exists(meta_path):
-                    logger.debug(
-                        "KV not ready for prefix=%s, will retry", prefix
-                    )
-                    return None, False
-                try:
-                    with open(meta_path) as f:
-                        meta = json.load(f)
-                except (json.JSONDecodeError, OSError) as e:
-                    logger.warning(
-                        "Failed to read meta for prefix=%s: %s",
-                        prefix, e,
-                    )
-                    return None, False
+                return None, False
 
             if not meta.get("completed"):
                 return None, False
@@ -834,21 +777,6 @@ class LocalPDConnector(KVConnectorBase_V1):
             return False, None
 
         return False, None
-
-    def _cleanup_kv_files(self, prefix: str) -> None:
-        """Remove KV files after decode completes."""
-        import shutil
-
-        kv_dir = os.path.join(self._storage_path, prefix)
-        if not os.path.exists(kv_dir):
-            return
-        try:
-            shutil.rmtree(kv_dir)
-            logger.debug("Cleaned up KV files for prefix=%s", prefix)
-        except OSError as e:
-            logger.warning(
-                "Failed to clean up KV files for prefix=%s: %s", prefix, e
-            )
 
     # ==============================
     # Worker-side methods
@@ -1388,11 +1316,6 @@ class LocalPDConnector(KVConnectorBase_V1):
                     "get_finished: IPC done, freeing prefill blocks %s",
                     finished_sending,
                 )
-
-        # Also drain legacy finished_sending
-        if self._ipc_finished_sending:
-            finished_sending |= self._ipc_finished_sending
-            self._ipc_finished_sending.clear()
 
         # finished_recving: sync mode, all load requests are done
         load_req_ids = {
