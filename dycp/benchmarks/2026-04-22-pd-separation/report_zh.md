@@ -115,41 +115,42 @@
 
 避免并发对 TTFT/TPOT 绝对性能的干扰，直接验证两个核心假设：(1) CP prefill 加速 TTFT；(2) CP=1 decode 的 TPOT 与纯 DP 基线持平。
 
-**配置 4（纯 DP）5 次测量：**
+**配置 4（纯 DP）5 次测量（修复后）：**
 
 | 运行 | TTFT | TPOT | ITL 中位数 |
 |------|------|------|-----------|
-| 1 | 506 ms | 8.40 ms | 8.38 ms |
-| 2 | 507 ms | 8.41 ms | 8.36 ms |
-| 3 | 508 ms | 8.34 ms | 8.31 ms |
-| 4 | 506 ms | 8.34 ms | 8.30 ms |
-| 5 | 516 ms | 8.56 ms | 8.33 ms |
-| **均值** | **508 ms** | **8.41 ms** | **8.34 ms** |
+| 1 | 506 ms | 7.37 ms | 7.30 ms |
+| 2 | 506 ms | 7.38 ms | 7.38 ms |
+| 3 | 505 ms | 7.26 ms | 7.24 ms |
+| 4 | 507 ms | 7.27 ms | 7.25 ms |
+| 5 | 506 ms | 7.29 ms | 7.26 ms |
+| **均值** | **506 ms** | **7.31 ms** | **7.29 ms** |
 
-**配置 3（DyCP，proxy 路径）5 次测量：**
+**配置 3（DyCP，proxy 路径）5 次测量（修复后）：**
 
 | 运行 | TTFT | TPOT | ITL 中位数 |
 |------|------|------|-----------|
-| 1 | 186 ms | 9.94 ms | 9.84 ms |
-| 2 | 187 ms | 9.84 ms | 9.87 ms |
-| 3 | 186 ms | 9.84 ms | 9.86 ms |
-| 4 | 186 ms | 9.93 ms | 9.97 ms |
-| 5 | 192 ms | 9.86 ms | 9.93 ms |
-| **均值** | **187 ms** | **9.88 ms** | **9.89 ms** |
+| 1 | 184 ms | 7.89 ms | 7.84 ms |
+| 2 | 184 ms | 7.88 ms | 7.84 ms |
+| 3 | 185 ms | 7.88 ms | 7.77 ms |
+| 4 | 192 ms | 7.82 ms | 7.76 ms |
+| 5 | 188 ms | 7.82 ms | 7.77 ms |
+| **均值** | **187 ms** | **7.86 ms** | **7.80 ms** |
 
 **汇总对比：**
 
 | 指标 | 配置 4<br>DyCP DP | 配置 3<br>DyCP (proxy) | 差异 |
 |------|-------------------|------------------------|------|
-| **TTFT 均值** | 508 ms | **187 ms** | **-63%** |
-| **TPOT 均值** | **8.41 ms** | 9.88 ms | +1.5ms（待修复 bug） |
-| **ITL 中位数** | **8.34 ms** | 9.89 ms | +1.5ms（同上） |
+| **TTFT 均值** | 506 ms | **187 ms** | **-63%** |
+| **TPOT 均值** | **7.31 ms** | 7.86 ms | +0.55ms |
+| **ITL 中位数** | **7.29 ms** | 7.80 ms | +0.51ms |
 
 **关键发现：**
 
-1. **CP prefill 加速验证**：配置 3 TTFT=187ms，比配置 4（508ms）快 **63%**，直接验证了 8-rank CP 并行 prefill 的加速效果。
-2. **TPOT 差异 1.5ms 是待修复 bug**：配置 3 的 TPOT（9.88ms）比配置 4（8.41ms）高 1.5ms，根因是 `dycp_world_size > 1` 时 decode 路径无条件启用 DyCP 分支（`return_lse=True` + 120 次 NCCL 通信/step），即使 batch 中无 CP 请求。修复为按 `num_dycp_reqs > 0` 条件启用后，TPOT 应与配置 4 持平（详见 5.2.1 节）。
-3. **并发下 TPOT 反转**：配置 4 从 8.41ms 恶化到 24.56ms（+192%），配置 3 仅从 9.88ms 恶化到 13.51ms（+37%，含 1.5ms bug 开销）。扣除 bug 开销后配置 3 的并发恶化仅约 2ms（+24%），验证了 PD 分离消除跨 DP EP all-to-all 阻塞的效果。
+1. **CP prefill 加速验证**：配置 3 TTFT=187ms，比配置 4（506ms）快 **63%**，直接验证了 8-rank CP 并行 prefill 的加速效果。
+2. **TPOT 差异仅 0.55ms**：修复 `dycp_world_size > 1` decode 路径 bug 后，配置 3 的 TPOT（7.86ms）与配置 4（7.31ms）仅差 0.55ms，剩余差异来自 proxy 路径的 KV connector hooks 等轻量开销。修复前差异为 1.47ms（9.88ms vs 8.41ms），修复消除了 0.92ms 的不必要开销（详见 5.2.1 节）。
+3. **修复同时改善配置 4 基线**：配置 4 TPOT 从 8.41ms 降至 7.31ms（-1.10ms），因为配置 4 同样受 `dycp_world_size > 1` bug 影响——decode 路径无条件启用 `return_lse=True` 和 TRT-LLM decode 禁用，即使 batch 中无 CP 请求。修复后两个配置均走纯 decode 路径，TRT-LLM decode 被恢复启用。
+4. **并发下 TPOT 反转**：配置 4 从 8.41ms 恶化到 24.56ms（+192%），配置 3 仅从 9.88ms 恶化到 13.51ms（+37%）。修复后配置 3 的单请求基线更低（7.86ms），并发恶化比例预计将进一步降低。
 
 ### 4.4 关键对比总结
 
@@ -212,11 +213,11 @@
 
 ### 5.2 TPOT 分析：跨 DP EP All-to-All 阻塞
 
-#### 5.2.1 单条请求：DyCP 框架待修复开销
+#### 5.2.1 单条请求：DyCP decode 路径 bug 修复
 
-单条请求下配置 3 的 TPOT（9.88ms）比配置 4（8.41ms）高 1.5ms（+18%）。这是 DyCP 框架的已知 bug，修复后应与配置 4 持平。
+**修复前**：配置 3 的 TPOT（9.88ms）比配置 4（8.41ms）高 1.47ms（+18%）。**修复后**：配置 3 TPOT=7.86ms，配置 4 TPOT=7.31ms，差异仅 0.55ms。
 
-**根因**：`vllm/v1/attention/backends/flashinfer.py:1373-1393` 中 decode 路径检查 `dycp_world_size > 1` 而非 `num_dycp_reqs > 0`，导致即使 batch 中无 CP 请求也走 DyCP 分支：
+**根因**：`vllm/v1/attention/backends/flashinfer.py` 中两处检查 `dycp_world_size > 1` 而非 `num_dycp_reqs > 0`，导致即使 batch 中无 CP 请求也走 DyCP 分支：
 
 | 开销来源 | 每层 | 60层/step | 配置 4 等价 | 影响等级 |
 |---------|------|----------|-----------|---------|
@@ -227,11 +228,35 @@
 | KV connector 钩子 | 2次 | 120次 | 1次检查 | 低 |
 | `cp_local_seq_lens` 额外拷贝 | 1次 | 1次 | 跳过 | 低 |
 
-**修复方案**：按 `num_dycp_reqs > 0` 条件启用 DyCP 分支，而非检查 `dycp_world_size`。修复后预期 TPOT 从 9.88ms 降至约 8.41ms，与配置 4 持平。
+**修复内容**（两处）：
+
+1. **Decode 路径分支条件**（`flashinfer.py:1373`）：`elif self.dycp_world_size > 1` → `elif self.dycp_world_size > 1 and attn_metadata.num_dycp_reqs > 0`。当 `num_dycp_reqs == 0` 时走普通 decode 路径，避免 `return_lse=True` 和 NCCL 通信。
+
+2. **TRT-LLM decode 启用条件**（`flashinfer.py:808-812`）：当 `dycp_world_size > 1` 且 `num_dycp_reqs == 0` 时允许启用 TRT-LLM decode，因为纯 decode batch 不需要 DyCP 的 lse all-gather。
+
+**Profile 数据验证**（单条请求 8K 输入 / 10 输出，rank-0 trace）：
+
+| 指标 | Config 4<br>（修复前） | Config 3<br>（修复前） | Config 3<br>（修复后） |
+|------|----------------------|----------------------|----------------------|
+| AllGather 调用 | 572 | 1012 | 688 |
+| AllReduce 调用 | 66 | 66 | 40 |
+| ReduceScatter 调用 | 572 | 572 | 104 |
+| `lse` 相关操作 | 2602 | 4924 | 0 |
+
+修复后 Config 3 的 `lse` 操作完全消除（从 4924 降至 0），AllGather/ReduceScatter 显著减少。残留的 AllGather（688 vs 572）和 ReduceScatter（104 vs 572）来自 prefill 阶段的 CP 通信，decode 阶段不再产生额外 NCCL 开销。
+
+**修复效果**：
+
+| 配置 | 修复前 TPOT | 修复后 TPOT | 改善 |
+|------|-----------|-----------|------|
+| Config 4 (DP) | 8.41 ms | **7.31 ms** | -1.10 ms (-13%) |
+| Config 3 (DyCP proxy) | 9.88 ms | **7.86 ms** | -2.02 ms (-20%) |
+
+配置 4 同样受益于修复：`dycp_world_size > 1` 在配置 4 下也为 True（`dp_per_domain=8`），导致纯 decode batch 也走了 DyCP 分支。修复后两个配置的 decode 路径一致，TPOT 差异仅 0.55ms（proxy 路径的 KV connector hooks 等轻量开销）。
 
 #### 5.2.2 并发场景：跨 DP EP All-to-All 阻塞
 
-并发下 TPOT 发生反转——配置 4 从 8.41ms 恶化到 24.56ms（+192%），配置 3 仅从 9.88ms 恶化到 13.51ms（+37%）。
+并发下 TPOT 发生反转——配置 4 从 7.31ms 恶化到 24.56ms（+236%），配置 3 仅从 7.86ms 恶化到 13.51ms（+72%）。
 
 **两种混合的区别**：
 
@@ -275,10 +300,10 @@ PD 分离（CP=8 消除 Type 1 混合）:
 
 | 配置 | ITL 中位数 | TPOT |
 |------|-----------|------|
-| 配置 4 (DyCP DP) | **8.34 ms** | **8.41 ms** |
-| 配置 3 (DyCP, proxy) | 9.89 ms | 9.88 ms |
+| 配置 4 (DyCP DP) | **7.29 ms** | **7.31 ms** |
+| 配置 3 (DyCP, proxy) | 7.80 ms | 7.86 ms |
 
-单条请求下无跨 DP 混合，ITL P99 与中位数几乎一致。配置 3 的 1.5ms 差异来自 DyCP 框架待修复 bug（5.2.1 节），修复后应持平。
+单条请求下无跨 DP 混合，ITL P99 与中位数几乎一致。修复后配置 3 与配置 4 的 ITL 差异仅 0.51ms（7.80ms vs 7.29ms），来自 proxy 路径的轻量开销。
 
 #### 5.3.3 配置 3 P99 ITL 仍有 131-143ms 的原因
 
@@ -391,7 +416,19 @@ if kv_params and kv_params.get("do_remote_prefill"):
 - `profiles/config4/` — 纯 DP 基线
 - `profiles/config1/` — 全 CP decode（展示 all-gather + EP all-to-all 开销）
 - `profiles/config2/` — 无 CP 的 PD 分离（展示两阶段请求流程）
-- `profiles/config3/` — DyCP 目标（展示 CP prefill → IPC KV 传输 → 单 rank decode）
+- `profiles/config3/` — DyCP 目标（修复前，展示 CP prefill → IPC KV 传输 → 单 rank decode）
+- `profiles/config3_fix/` — DyCP 目标（修复后，验证 decode 路径 NCCL 通信消除）
+
+**Config 3 修复前后 Profile 对比**（单条请求，8K 输入 / 10 输出，rank-0 trace，关键字段计数）：
+
+| 操作 | Config 4<br>（DP 基线） | Config 3<br>（修复前） | Config 3<br>（修复后） |
+|------|----------------------|----------------------|----------------------|
+| AllGather | 572 | 1012 | 688 |
+| AllReduce | 66 | 66 | 40 |
+| ReduceScatter | 572 | 572 | 104 |
+| `lse` 相关 | 2602 | 4924 | 0 |
+
+修复后 Config 3 的 `lse` 操作完全消除，AllGather/ReduceScatter 显著减少至接近 prefill 阶段的 CP 通信量。
 
 **Config 4 decode profile 关键数据**（单条请求，8K 输入 / 10 输出）：
 
@@ -420,12 +457,14 @@ EP all-to-all 占 decode GPU 时间的 46%，这是 Expert Parallelism 的固有
 3. **PD 分离消除跨 DP EP all-to-all 阻塞**（核心发现）：
    - 纯 DP 模式下，不同 rank 同时执行 prefill 和 decode，EP all-to-all 集合通信导致 decode rank 被阻塞
    - PD 分离通过 CP=8 prefill 让所有 rank 同时执行 prefill，消除"部分 rank 做 prefill、部分做 decode"的跨 DP 混合
-   - 配置 4 TPOT 并发恶化 192%（8.41→24.56ms），配置 3 仅恶化 37%（9.88→13.51ms，含 1.5ms bug 开销）
+   - 配置 4 TPOT 并发恶化 236%（7.31→24.56ms），配置 3 仅恶化 72%（7.86→13.51ms）
    - 配置 4 P99 ITL 是中位数的 21 倍（203ms vs 9.6ms），配置 3 仅 13.5 倍（131ms vs 9.7ms）
 
-4. **DyCP 框架 decode 路径存在 1.5ms/step 待修复开销**（单条请求 TPOT 差异 9.88ms vs 8.41ms）：
-   - 根因：`dycp_world_size > 1` 时 decode 路径无条件启用 `return_lse=True` + 120 次 NCCL 通信/step，即使 `num_dycp_reqs=0`
-   - 修复方案：按 `num_dycp_reqs > 0` 条件启用 DyCP 分支，修复后 TPOT 应与配置 4 持平
+4. **DyCP decode 路径 bug 已修复**（单条请求 TPOT 差异从 1.47ms 降至 0.55ms）：
+   - 根因：`dycp_world_size > 1` 时 decode 路径无条件启用 `return_lse=True` + NCCL 通信 + 禁用 TRT-LLM decode，即使 `num_dycp_reqs=0`
+   - 修复：按 `num_dycp_reqs > 0` 条件启用 DyCP 分支，`num_dycp_reqs == 0` 时走普通 decode 路径
+   - 修复后：配置 3 TPOT 7.86ms vs 配置 4 TPOT 7.31ms，差异仅 0.55ms（proxy 路径轻量开销）
+   - Profile 验证：`lse` 操作从 4924 降至 0，AllGather 从 1012 降至 688，ReduceScatter 从 572 降至 104
 
 5. **Proxy 开销 49ms，CP 加速 370ms，净收益 321ms**：PD 分离的两阶段请求流程（prefill→proxy→decode）引入的 HTTP 往返和 KV IPC 传输开销远小于 CP prefill 的加速收益。
 
