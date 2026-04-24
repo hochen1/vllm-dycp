@@ -1993,41 +1993,50 @@ class GPUModelRunner(
                     )
                     # Compute indices of real (non-padding) tokens in the
                     # restored allgathered buffer — pure math, no comms.
-                    # DualChunkSwap assigns ALL padding to rank 0 (the
-                    # last chunk always goes to rank 0's tail portion).
-                    orig_counts = self._dycp_orig_scheduled
-                    pad_counts = self.pcp_manager.num_pcp_pads_cpu[
-                        :len(orig_counts)
-                    ]
-                    padded_counts = orig_counts + pad_counts
-                    pcp_per_rank = padded_counts // self.dycp_world_size
-                    masks = []
-                    for r in range(self.dycp_world_size):
-                        rank_parts = []
-                        for i in range(len(orig_counts)):
-                            n_total = int(pcp_per_rank[i])
-                            # Rank 0 gets ALL padding; other ranks: 0.
-                            n_pad = int(pad_counts[i]) if r == 0 else 0
-                            n_real = n_total - n_pad
-                            rank_parts.append(
-                                np.ones(n_real, dtype=np.bool_))
-                            if n_pad > 0:
-                                rank_parts.append(
-                                    np.zeros(n_pad, dtype=np.bool_))
-                        masks.append(np.concatenate(rank_parts))
-                    full_mask = np.concatenate(masks)
+                    # Use the unpad mask already computed by
+                    # update_tokens_for_pcp(), which correctly handles
+                    # DualChunkSwap padding distribution across all ranks.
+                    unpad_mask = (
+                        self.pcp_manager.pcp_unpad_mask_cpu[
+                            :dycp_allgather_size
+                        ]
+                    )
                     restore_idx_np = (
                         self.pcp_manager
                         .pcp_allgather_restore_idx.np[
-                            :len(full_mask)
+                            :dycp_allgather_size
                         ]
                     )
-                    restored_mask = full_mask[restore_idx_np]
+                    restored_mask = unpad_mask[restore_idx_np]
                     real_indices_np = np.nonzero(restored_mask)[0]
                     cm_base.dycp_real_token_indices = (
                         torch.from_numpy(
                             real_indices_np.astype(np.int64)
                         ).to(self.device)
+                    )
+
+                # Compute context KV lens for DyCP prefill extend.
+                # Use num_computed_tokens directly — it represents the
+                # number of tokens already in KV cache, identical across
+                # all DyCP ranks.  Do NOT derive from seq_lens because
+                # seq_lens includes PCP-split query tokens which differ
+                # per rank, causing has_context mismatch and NCCL deadlock.
+                context_kv_lens = torch.from_numpy(
+                    self.input_batch.num_computed_tokens_cpu[
+                        :num_dycp_reqs
+                    ].astype(np.int64)
+                ).to(self.device)
+                max_ctx = int(context_kv_lens.max().item())
+                if max_ctx > 0:
+                    local_ctx = get_cp_local_seq_lens(
+                        context_kv_lens,
+                        self.dycp_world_size,
+                        self.dycp_rank,
+                        self.parallel_config.cp_kv_cache_interleave_size,
+                    )
+                    cm_base.dycp_context_kv_lens = local_ctx
+                    cm_base.max_dycp_context_kv_len = int(
+                        local_ctx.max().item()
                     )
 
             self.cp_local_seq_lens.cpu[num_dycp_reqs:num_reqs].copy_(self.seq_lens.cpu[num_dycp_reqs:num_reqs])

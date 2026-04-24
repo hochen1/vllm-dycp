@@ -228,6 +228,11 @@ class FlashAttentionMetadata:
     pcp_allgather_restore_idx: torch.Tensor | None = None
     dycp_real_token_indices: torch.Tensor | None = None
 
+    # DyCP context attention for extend (GQA)
+    dycp_context_kv_lens: torch.Tensor | None = None
+    max_dycp_context_kv_len: int = 0
+    dycp_context_scheduler_metadata: torch.Tensor | None = None
+
     # DyCP DualChunkSwap indices (prefill only)
     dycp_q_head_indices: torch.Tensor | None = None
     dycp_q_tail_indices: torch.Tensor | None = None
@@ -621,6 +626,28 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 # Scheduler metadata not used for DualChunkSwap;
                 # attention uses dense KV, not paged cache.
                 scheduler_metadata = None
+
+                # Build context scheduler metadata for extend
+                # (context attention uses paged cache).
+                dycp_context_kv_lens = (
+                    common_attn_metadata.dycp_context_kv_lens
+                )
+                max_dycp_context_kv_len = (
+                    common_attn_metadata.max_dycp_context_kv_len
+                )
+                dycp_context_scheduler_metadata = None
+                if (
+                    dycp_context_kv_lens is not None
+                    and max_dycp_context_kv_len > 0
+                ):
+                    dycp_context_scheduler_metadata = schedule(
+                        batch_size=num_reqs,
+                        cu_query_lens=query_start_loc,
+                        max_query_len=max_query_len,
+                        seqlens=dycp_context_kv_lens,
+                        max_seq_len=max_dycp_context_kv_len,
+                        causal=False,
+                    )
             else:
                 # ---- DyCP DECODE: local seq_lens + allreduce ----
                 if num_dycp_reqs > 0:
@@ -750,6 +777,16 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             ),
             dycp_kv_cu_tail=(
                 _cu(kv_tail_lens) if has_dycp_prefill else None
+            ),
+            dycp_context_kv_lens=(
+                dycp_context_kv_lens if has_dycp_prefill else None
+            ),
+            max_dycp_context_kv_len=(
+                max_dycp_context_kv_len if has_dycp_prefill else 0
+            ),
+            dycp_context_scheduler_metadata=(
+                dycp_context_scheduler_metadata
+                if has_dycp_prefill else None
             ),
         )
         return attn_metadata
@@ -896,7 +933,7 @@ class FlashAttentionImpl(AttentionImpl):
         has_decode = attn_metadata.num_decodes > 0
         has_prefill = attn_metadata.num_prefills > 0
 
-        if has_prefill and has_decode:
+        if has_prefill and has_decode and self.dycp_world_size > 1:
             raise NotImplementedError(
                 "Prefill and decode are not supported in the dcyp forward pass."
             )
@@ -1051,8 +1088,71 @@ class FlashAttentionImpl(AttentionImpl):
                 # LSE from FA: [H, B] for each chunk
                 combined_lse = torch.cat([lse_head, lse_tail], dim=-1)
 
-                output[:n_dycp_tok] = torch.index_select(
-                    combined, 0, ori)
+                suffix_output = torch.index_select(combined, 0, ori)
+                suffix_lse = torch.index_select(combined_lse, -1, ori)
+
+                # Context attention for extend (chunked prefill).
+                # In DyCP, context KV is interleaved across ranks.
+                # Each rank computes local context attention, then
+                # allreduce to get the full context result.
+                has_context = (
+                    attn_metadata.dycp_context_kv_lens is not None
+                    and attn_metadata.max_dycp_context_kv_len > 0
+                )
+                if has_context:
+                    descale_shape = (
+                        attn_metadata.query_start_loc.shape[0] - 1,
+                        self.num_kv_heads,
+                    )
+                    if self.kv_cache_dtype.startswith("fp8"):
+                        ctx_kc = key_cache.view(
+                            FlashAttentionBackend
+                            .get_fp8_dtype_for_flashattn(
+                                self.kv_cache_dtype))
+                        ctx_vc = value_cache.view(ctx_kc.dtype)
+                    else:
+                        ctx_kc = key_cache
+                        ctx_vc = value_cache
+
+                    context_output, context_lse = flash_attn_varlen_func(
+                        q=query[:n_dycp_tok],
+                        k=ctx_kc,
+                        v=ctx_vc,
+                        cu_seqlens_q=attn_metadata.query_start_loc,
+                        max_seqlen_q=attn_metadata.max_query_len,
+                        seqused_k=attn_metadata.dycp_context_kv_lens,
+                        max_seqlen_k=attn_metadata.max_dycp_context_kv_len,
+                        softmax_scale=self.scale,
+                        causal=False,
+                        block_table=attn_metadata.block_table,
+                        return_softmax_lse=True,
+                        fa_version=self.vllm_flash_attn_version,
+                        q_descale=layer._q_scale.expand(descale_shape),
+                        k_descale=layer._k_scale.expand(descale_shape),
+                        v_descale=layer._v_scale.expand(descale_shape),
+                        scheduler_metadata=(
+                            attn_metadata.dycp_context_scheduler_metadata
+                        ),
+                    )
+                    # Allreduce context across DyCP ranks.
+                    # cp_lse_ag_out_ar expects LSE in [B, H].
+                    context_output, context_lse_bh = cp_lse_ag_out_ar(
+                        context_output,
+                        context_lse.transpose(0, 1),
+                        get_dycp_group(),
+                        return_lse=True,
+                    )
+                    # merge_attn_states expects LSE in [H, B].
+                    merge_attn_states(
+                        output[:n_dycp_tok],
+                        context_output,
+                        context_lse_bh.transpose(0, 1),
+                        suffix_output,
+                        suffix_lse,
+                    )
+                else:
+                    output[:n_dycp_tok] = suffix_output
+
                 return output
 
         if self.kv_cache_dtype.startswith("fp8"):
