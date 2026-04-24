@@ -252,10 +252,8 @@ class LocalPDConnector(KVConnectorBase_V1):
             self._ipc_delayed_prefill_ids: dict[str, str] = {}
 
         if role == KVConnectorRole.WORKER:
-            # Legacy state (used when IPC is not available)
             self._gpu_kv_buffer: dict[str, dict[str, torch.Tensor]] = {}
             self._pending_local_kv: dict[str, list[tuple[str, torch.Tensor]]] = {}
-            self._pending_cp_rank: int = 0
             # IPC state (populated in register_kv_caches)
             self._cuda_lib = None
             # {src_rank: {layer_name: (remote_ptr, shape, dtype, elem_size)}}
@@ -1088,197 +1086,61 @@ class LocalPDConnector(KVConnectorBase_V1):
         layer_name: str,
         kv_layer: torch.Tensor,
         attn_metadata: AttentionMetadata,
-        **kwargs: Any,
     ) -> None:
         """Save KV cache for prefill requests.
 
-        For multi-rank CP: uses raw pre-mask KV from attention args
-        (passed via kwargs by the decorator) to all-gather complete KV.
-        For single-rank: extracts directly from paged buffer.
+        IPC mode: KV is already in each rank's paged buffer via the
+        attention kernel; decode reads via IPC. For multi-rank CP
+        requests, no extraction is needed. For single-rank requests,
+        extract KV from the paged buffer into _gpu_kv_buffer.
         """
         metadata = self._get_connector_metadata()
         if not isinstance(metadata, LocalPDConnectorMetadata):
             return
-        # Fast path: skip entirely if no store requests (decode phase)
         if not metadata.has_store_requests:
             return
 
+        # In IPC mode with multi-rank CP, KV is already in paged buffers.
+        # No extraction needed — decode reads directly via IPC.
+        cp_size = getattr(attn_metadata, "num_dycp_reqs", 0)
+        if self._ipc_initialized and self._cp_world_size > 1 and cp_size > 0:
+            return
+
         is_mla = isinstance(attn_metadata, MLACommonMetadata)
-        cp_rank = metadata.cp_rank
-        raw_kv_c_normed = kwargs.get("_raw_kv_c_normed")
-        raw_k_pe = kwargs.get("_raw_k_pe")
 
         for req_meta in metadata.requests:
             if not req_meta.is_store:
                 continue
 
             prefix = req_meta.pd_request_prefix
-            num_tokens = req_meta.slot_mapping.shape[0]
 
-            # Determine CP mode from scheduler metadata
-            cp_size = getattr(attn_metadata, "num_dycp_reqs", 0)
-            is_multi_cp = (
-                self._cp_world_size > 1
-                and cp_size > 0
-                and raw_kv_c_normed is not None
-                and is_mla
-            )
-
-            if is_multi_cp:
-                if self._ipc_initialized:
-                    # IPC mode: KV is already in each rank's paged buffer
-                    # via the attention kernel. Decode reads via IPC.
-                    pass
-                else:
-                    # Legacy: buffer raw KV for batch all-gather
-                    self._save_kv_allgather_raw(
-                        layer_name, raw_kv_c_normed, raw_k_pe,
-                        attn_metadata, num_tokens,
-                        cp_rank, prefix,
-                    )
+            actual_sm = getattr(attn_metadata, "slot_mapping", None)
+            if actual_sm is not None:
+                actual_sm = actual_sm.flatten()
+                valid = actual_sm >= 0
+                sm = actual_sm[valid]
             else:
-                # Single CP rank: extract from paged buffer.
-                # Use attn_metadata.slot_mapping (works for all chunks)
-                # instead of req_meta.slot_mapping (may be empty for
-                # continuation chunks).
-                actual_sm = getattr(attn_metadata, "slot_mapping", None)
-                if actual_sm is not None:
-                    actual_sm = actual_sm.flatten()
-                    # Filter to valid slots only
-                    valid = actual_sm >= 0
-                    sm = actual_sm[valid]
+                sm = req_meta.slot_mapping
+            if sm.shape[0] == 0:
+                continue
+            kv_data = _extract_kv_from_layer(kv_layer, sm, is_mla)
+            existing = self._gpu_kv_buffer.get(prefix, {}).get(
+                layer_name
+            )
+            if existing is not None:
+                if is_mla:
+                    kv_data = torch.cat([existing, kv_data], dim=0)
                 else:
-                    sm = req_meta.slot_mapping
-                if sm.shape[0] == 0:
-                    continue
-                kv_data = _extract_kv_from_layer(kv_layer, sm, is_mla)
-                # Accumulate across chunks for chunked prefill
-                existing = self._gpu_kv_buffer.get(prefix, {}).get(
-                    layer_name
-                )
-                if existing is not None:
-                    if is_mla:
-                        kv_data = torch.cat([existing, kv_data], dim=0)
-                    else:
-                        kv_data = torch.cat([existing, kv_data], dim=1)
-                self._gpu_kv_buffer.setdefault(prefix, {})[layer_name] = (
-                    kv_data.detach()
-                )
-
-    def _save_kv_allgather_raw(
-        self,
-        layer_name: str,
-        raw_kv_c_normed: torch.Tensor,
-        raw_k_pe: torch.Tensor,
-        attn_metadata: AttentionMetadata,
-        num_tokens: int,
-        cp_rank: int,
-        prefix: str,
-    ) -> None:
-        """Buffer pre-mask local KV for batch all-gather in wait_for_save.
-
-        Instead of doing NCCL all-gather per layer (27 times),
-        we buffer the local KV and do a single batch all-gather
-        in wait_for_save() after all layers complete.
-        """
-        num_actual = getattr(attn_metadata, "num_actual_tokens", num_tokens)
-        local_kv = torch.cat([
-            raw_kv_c_normed[:num_actual],
-            raw_k_pe[:num_actual].squeeze(1),
-        ], dim=-1)
-
-        # Buffer for batch processing
-        self._pending_local_kv.setdefault(prefix, []).append(
-            (layer_name, local_kv.detach())
-        )
-        self._pending_cp_rank = cp_rank
-        # Store restore index (same for all layers, save once)
-        if not hasattr(self, "_pending_restore_idx"):
-            self._pending_restore_idx = None
-        restore_idx = getattr(
-            attn_metadata, "pcp_allgather_restore_idx", None
-        )
-        if restore_idx is not None:
-            self._pending_restore_idx = restore_idx
+                    kv_data = torch.cat([existing, kv_data], dim=1)
+            self._gpu_kv_buffer.setdefault(prefix, {})[layer_name] = (
+                kv_data.detach()
+            )
 
     def wait_for_save(self):
-        """Batch all-gather all pending local KV across CP ranks.
-
-        In IPC mode: no-op. KV stays in each rank's paged buffer.
-        In legacy mode: performs all-gather (backward compatibility).
-        """
-        if self._ipc_initialized and not self._pending_local_kv:
+        """In IPC mode: no-op. KV stays in each rank's paged buffer."""
+        if not self._pending_local_kv:
             logger.info("wait_for_save: IPC mode, no-op (0ms)")
             return
-
-        if not self._pending_local_kv:
-            return
-
-        import time as _time
-        _t0 = _time.monotonic()
-
-        from vllm.distributed.parallel_state import get_dycp_group
-        dycp_group = get_dycp_group()
-        cp_rank = self._pending_cp_rank
-        restore_idx = getattr(self, "_pending_restore_idx", None)
-
-        for prefix, layer_kvs in self._pending_local_kv.items():
-            # Concatenate all layers' local KV into one tensor
-            # for a single all-gather call
-            layer_names = [name for name, _ in layer_kvs]
-            local_tensors = [kv for _, kv in layer_kvs]
-            # All same shape [num_actual, kv_dim]
-            stacked = torch.cat(local_tensors, dim=0)  # [num_layers * N, D]
-
-            # Single all-gather for all layers
-            gathered = dycp_group.all_gather(
-                stacked.contiguous(), dim=0
-            )
-
-            # All ranks reconstruct so any rank can serve decode
-            tokens_per_layer = local_tensors[0].shape[0]
-            num_layers = len(layer_names)
-            W = self._cp_world_size
-
-            # Split gathered back into per-rank, per-layer chunks
-            # gathered shape: [W * num_layers * N, D]
-            # Layout: [rank0_layer0, rank0_layer1, ..., rank0_layerN,
-            #          rank1_layer0, ..., rankW_layerN]
-            for layer_idx, layer_name in enumerate(layer_names):
-                # Collect this layer's data from each rank
-                layer_chunks = []
-                for r in range(W):
-                    start = (r * num_layers + layer_idx) * tokens_per_layer
-                    end = start + tokens_per_layer
-                    layer_chunks.append(gathered[start:end])
-
-                layer_gathered = torch.cat(layer_chunks, dim=0)
-
-                # Apply DualChunkSwap restore
-                if restore_idx is not None and restore_idx.shape[0] > 0:
-                    total = layer_gathered.shape[0]
-                    ri = restore_idx[:total].to(layer_gathered.device)
-                    ri = torch.clamp(ri, 0, total - 1)
-                    layer_gathered = layer_gathered[ri]
-
-                # Accumulate: append to existing buffer (chunked prefill)
-                existing = self._gpu_kv_buffer.get(prefix, {}).get(
-                    layer_name
-                )
-                if existing is not None:
-                    layer_gathered = torch.cat(
-                        [existing, layer_gathered], dim=0
-                    )
-
-                self._gpu_kv_buffer.setdefault(prefix, {})[layer_name] = (
-                    layer_gathered
-                )
-
-        self._pending_local_kv.clear()
-        self._pending_restore_idx = None
-
-        _elapsed = (_time.monotonic() - _t0) * 1000
-        logger.info("wait_for_save: all-gather + restore in %.1fms", _elapsed)
 
     def get_finished(
         self, finished_req_ids: set[str]
