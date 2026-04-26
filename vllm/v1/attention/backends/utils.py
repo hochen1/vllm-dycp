@@ -125,6 +125,13 @@ class CommonAttentionMetadata:
     """Indices of real (non-padding) tokens in the restored allgathered
     buffer. Used to extract real KV entries for cache write."""
 
+    dycp_context_kv_lens: torch.Tensor | None = None
+    """Local (interleaved) context KV lengths per DyCP request for extend.
+    Used by GQA DyCP prefill to compute context attention."""
+
+    max_dycp_context_kv_len: int = 0
+    """Max local context KV length across all DyCP requests."""
+
     @property
     @deprecated(
         """
@@ -362,6 +369,10 @@ def slice_common_attn_metadata(
     sliced.num_dycp_tokens = num_dycp_tokens
     sliced.dycp_full_slot_mapping = attn_metadata.dycp_full_slot_mapping
     sliced.dycp_real_token_indices = attn_metadata.dycp_real_token_indices
+    sliced.dycp_context_kv_lens = _maybe_slice_tensor(
+        attn_metadata.dycp_context_kv_lens
+    )
+    sliced.max_dycp_context_kv_len = attn_metadata.max_dycp_context_kv_len
     return sliced
 
 
