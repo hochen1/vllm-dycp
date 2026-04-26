@@ -373,18 +373,81 @@ class CrossDPScheduler(Scheduler):
         if self.connector is None:
             return False, None
 
-        block_ids = self.kv_cache_manager.get_block_ids(request)
+        all_rank_block_ids = self.kv_cache_manager.get_block_ids(request)
 
         if not isinstance(self.connector, SupportsHMA):
-            # NOTE(Kuntai): We should deprecate this code path after we enforce
-            # all connectors to support HMA.
-            # Hybrid memory allocator should be already turned off for this
-            # code path, but let's double-check here.
             assert len(self.kv_cache_config.kv_cache_groups) == 1
-            return self.connector.request_finished(request, block_ids[0])
+            # Flatten per-rank block_ids to a single list for the connector.
+            # all_rank_block_ids is list[tuple[list[int], ...]], one per rank.
+            flat_ids: list[int] = []
+            for rank_blocks in all_rank_block_ids:
+                flat_ids.extend(rank_blocks[0])
 
-        return self.connector.request_finished_all_groups(request, block_ids)
+            # Store per-rank block_ids for SEND filtering.
+            sched = getattr(self.connector, 'connector_scheduler', None)
+            if sched is not None and hasattr(sched, '_send_per_rank_blocks'):
+                cp_ranks = getattr(request, 'cp_ranks', None)
+                if cp_ranks and isinstance(all_rank_block_ids, list):
+                    per_rank: dict[int, list[int]] = {}
+                    for rank, rank_blocks in zip(
+                        cp_ranks, all_rank_block_ids
+                    ):
+                        per_rank[rank] = list(rank_blocks[0])
+                    sched._send_per_rank_blocks[
+                        request.request_id
+                    ] = per_rank
+
+            return self.connector.request_finished(request, flat_ids)
+
+        return self.connector.request_finished_all_groups(
+            request, all_rank_block_ids
+        )
     
+    def _update_waiting_for_remote_kv(self, request: Request) -> bool:
+        """CrossDP override: get_block_ids takes Request, returns per-rank."""
+        assert self.connector is not None
+        if request.request_id not in self.finished_recving_kv_req_ids:
+            return False
+
+        if request.request_id in self.failed_recving_kv_req_ids:
+            if request.num_computed_tokens:
+                self.kv_cache_manager.cache_blocks(
+                    request, request.num_computed_tokens
+                )
+            else:
+                self.kv_cache_manager.free(request)
+            self.failed_recving_kv_req_ids.remove(request.request_id)
+            logger.info(
+                "[PD] _update_waiting_for_remote_kv: req=%s FAILED, "
+                "num_computed=%d",
+                request.request_id, request.num_computed_tokens,
+            )
+        else:
+            all_rank_block_ids = self.kv_cache_manager.get_block_ids(request)
+            assert len(self.kv_cache_config.kv_cache_groups) == 1
+            total_blocks = sum(
+                len(rank_blocks[0]) for rank_blocks in all_rank_block_ids
+            )
+            num_computed_tokens = total_blocks * self.block_size
+            num_computed_tokens = min(num_computed_tokens, request.num_tokens)
+            if num_computed_tokens == request.num_tokens:
+                num_computed_tokens -= 1
+            logger.info(
+                "[PD] _update_waiting_for_remote_kv: req=%s OK, "
+                "total_blocks=%d, block_size=%d, "
+                "num_computed=%d, num_tokens=%d, "
+                "cp_ranks=%s, block_ids=%s",
+                request.request_id, total_blocks,
+                self.block_size, num_computed_tokens,
+                request.num_tokens, request.cp_ranks,
+                all_rank_block_ids,
+            )
+            self.kv_cache_manager.cache_blocks(request, num_computed_tokens)
+            request.num_computed_tokens = num_computed_tokens
+
+        self.finished_recving_kv_req_ids.remove(request.request_id)
+        return True
+
     def update_from_output(
         self,
         scheduler_outputs: list[SchedulerOutput],
@@ -1003,18 +1066,10 @@ class CrossDPScheduler(Scheduler):
                 # needed for this request.
                 request.cp_ranks = selected_dp
 
-                """
-                TODO(AoChen): update_state_after_alloc(PD disagg) is not implemented yet.
-                """
                 if self.connector is not None:
-                    """
-                        In the example connector, new_computed_blocks + new_blocks is not used,
-                        So, temparily ignore it.
-                    """
                     self.connector.update_state_after_alloc(
                         request=request,
-                        # new_computed_blocks + new_blocks,
-                        blocks=None,
+                        blocks=new_blocks,
                         num_external_tokens=num_external_computed_tokens,
                     )
 
@@ -1146,6 +1201,7 @@ class CrossDPScheduler(Scheduler):
             
             if sum(num_scheduled_tokens[idx].values()) == 0 and len(preempted_reqs[idx]) == 0 and len(self.finished_req_ids[idx]) == 0:
                 scheduler_output = SchedulerOutput.make_empty()
+                scheduler_output.cp_rank = idx
                 scheduler_output.none_tokens_in_peer_sched = none_tokens_in_peer_sched
                 total_scheduler_output.append(scheduler_output)
             else:
@@ -1183,6 +1239,14 @@ class CrossDPScheduler(Scheduler):
                     scheduler_output
                 )
                 scheduler_output.kv_connector_metadata = meta
+            # Clear send entries after all ranks processed.
+            # build_connector_meta's rank-based clearing is unreliable
+            # because empty SchedulerOutput defaults to cp_rank=0.
+            sched = getattr(self.connector, 'connector_scheduler', None)
+            if sched is not None and hasattr(sched, '_reqs_need_send'):
+                sched._reqs_need_send.clear()
+                if hasattr(sched, '_send_per_rank_blocks'):
+                    sched._send_per_rank_blocks.clear()
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             # self._update_after_schedule(scheduler_output)
