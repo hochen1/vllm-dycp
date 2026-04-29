@@ -1413,8 +1413,7 @@ def get_pcp_part_indices(
     starts = cu_num_tokens_np[:-1]  # [0, 2, 4]
     ends = cu_num_tokens_np[1:]  # [2, 4, 8]
     select_len = (ends - starts) * M // N  # [1, 1, 2], M=1, N=2
-    select_num_tokens = cu_num_tokens_np[-1] * M // N
-
+    select_num_tokens = select_len.sum()
     seq_ids = np.repeat(np.arange(len(select_len)), select_len)  # [0,1,2,2]
 
     start_loc = np.concatenate([[0], np.cumsum(select_len)[:-1]])  # [0,1,2]
