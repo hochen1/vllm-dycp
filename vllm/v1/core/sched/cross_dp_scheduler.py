@@ -1,5 +1,3 @@
-from ast import Set
-import itertools
 import os
 import time
 from collections import defaultdict
@@ -41,7 +39,7 @@ from vllm.v1.core.sched.output import (
     NewRequestData,
     SchedulerOutput,
 )
-from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue, LongShortRequestQueue
+from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue, LongShortRequestQueue, get_cp_size_for_request
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -60,6 +58,15 @@ from vllm.v1.core.sched.scheduler import Scheduler
 
 logger = init_logger(__name__)
 
+# Maximum consecutive scheduling steps where decode makes zero progress
+# before force-allowing prefills. This prevents permanent deadlock when a
+# decode request is stuck (e.g., NCCL hang, KV transfer stall) while
+# still allowing normal decode to run without interference.
+# Normal decode generates 1 token/step, so even short outputs take many
+# steps. A stall count of 50 means ~50 seconds of zero progress before
+# the escape hatch triggers (at ~1 step/second for decode).
+_DYCP_STALL_LIMIT = 50
+
 class RequestManager:
     def __init__(
         self,
@@ -70,27 +77,56 @@ class RequestManager:
         self.max_num_seqs = max_num_seqs
         self.num_long_req_per_domain = 0
         self.num_req_per_dp = [0] * self.cp_world_size
+        # Track number of running requests per CP size for accurate
+        # total request count under DyCP.
+        self.num_req_per_cp_size: dict[int, int] = {}
 
     def select_dp(
         self,
         request: Request,
         is_long: bool,
         rank_budgets: list[int] | None = None,
+        cp_size: int = 0,
     ) -> list[int] | None:
         if len(request.cp_ranks) > 0:
             if all([self.num_req_per_dp[rank] < self.max_num_seqs for rank in request.cp_ranks]):
                 return request.cp_ranks
+            # Stale cp_ranks from a preempted request: the old ranks
+            # are occupied. Fall through to DyCP-aware rank selection
+            # instead of returning None, which would block all
+            # subsequent scheduling.
+            if cp_size > 0:
+                request.cp_ranks = []
             else:
                 return None
 
-        if is_long:
+        if cp_size > 1:
+            # DyCP: select aligned rank subset of size cp_size.
+            # Ranks must start at multiples of cp_size.
+            best_group = None
+            best_min_reqs = float('inf')
+            for start in range(0, self.cp_world_size - cp_size + 1, cp_size):
+                group = list(range(start, start + cp_size))
+                if not all(self.num_req_per_dp[r] < self.max_num_seqs for r in group):
+                    continue
+                if rank_budgets is not None and not all(rank_budgets[r] > 0 for r in group):
+                    continue
+                max_reqs = max(self.num_req_per_dp[r] for r in group)
+                if max_reqs < best_min_reqs:
+                    best_min_reqs = max_reqs
+                    best_group = group
+            return best_group
+        elif is_long and cp_size < 1:
+            # Non-DyCP long request: use all ranks for context parallelism.
+            # When cp_size >= 1 (DyCP enabled), the threshold logic is
+            # authoritative — cp_size=1 means single rank regardless of
+            # is_long. Only use the all-ranks path when DyCP is disabled
+            # (cp_size == 0) and the request is classified as long.
             return [
                 i for i in range(self.cp_world_size)
             ]
         else:
             if rank_budgets is not None:
-                # Pick the rank with available seq slot AND most remaining
-                # token budget so that per-rank utilisation stays balanced.
                 candidates = [
                     i for i in range(self.cp_world_size)
                     if self.num_req_per_dp[i] < self.max_num_seqs
@@ -100,7 +136,6 @@ class RequestManager:
                     return None
                 best_dp = max(candidates, key=lambda i: rank_budgets[i])
             else:
-                # Fallback: pick rank with fewest requests.
                 best_dp = min(range(len(self.num_req_per_dp)),
                               key=lambda i: self.num_req_per_dp[i])
             return [best_dp]
@@ -109,15 +144,33 @@ class RequestManager:
         if len(request.cp_ranks) > 1:
             self.num_long_req_per_domain += 1
 
+        cp_size = len(request.cp_ranks)
+        self.num_req_per_cp_size[cp_size] = \
+            self.num_req_per_cp_size.get(cp_size, 0) + 1
+
         for rank in request.cp_ranks:
             self.num_req_per_dp[rank] += 1
-    
+
     def free_req(self, request: Request) -> None:
         if len(request.cp_ranks) > 1:
             self.num_long_req_per_domain -= 1
 
+        cp_size = len(request.cp_ranks)
+        self.num_req_per_cp_size[cp_size] = \
+            self.num_req_per_cp_size.get(cp_size, 0) - 1
+        assert self.num_req_per_cp_size[cp_size] >= 0, (
+            f"num_req_per_cp_size[{cp_size}] went negative: "
+            f"{self.num_req_per_cp_size[cp_size]}"
+        )
+        if self.num_req_per_cp_size[cp_size] == 0:
+            del self.num_req_per_cp_size[cp_size]
+
         for rank in request.cp_ranks:
             self.num_req_per_dp[rank] -= 1
+            assert self.num_req_per_dp[rank] >= 0, (
+                f"num_req_per_dp[{rank}] went negative: "
+                f"{self.num_req_per_dp[rank]}"
+            )
 
     def get_num_req_per_dp(self, dp_rank: int) -> int:
         return self.num_req_per_dp[dp_rank]
@@ -126,14 +179,38 @@ class RequestManager:
         return self.num_long_req_per_domain
 
     def get_total_num_req(self) -> int:
-        return sum(self.num_req_per_dp) - self.num_long_req_per_domain * (self.cp_world_size - 1)
+        # Count unique requests by accounting for per-CP-size
+        # deduplication. Each request with cp_size=N is counted N times
+        # in num_req_per_dp (once per rank), so we subtract (N-1)
+        # per request.
+        total = sum(self.num_req_per_dp)
+        for cp_size, count in self.num_req_per_cp_size.items():
+            total -= count * (cp_size - 1)
+        return total
 
     def has_slot_for_long_request(self) -> bool:
         return all(self.num_req_per_dp[i] < self.max_num_seqs for i in range(self.cp_world_size))
 
+    def has_slot_for_cp_request(self, cp_size: int) -> bool:
+        """Check if any aligned subgroup of cp_size has room for a new request.
+
+        Unlike has_slot_for_long_request which checks ALL ranks, this method
+        checks only the ranks needed for the given CP size. Under DyCP, a CP=2
+        request only needs 2 consecutive ranks, not all 8.
+        """
+        if cp_size <= 1:
+            # CP=1: any single rank with room
+            return any(self.num_req_per_dp[i] < self.max_num_seqs
+                       for i in range(self.cp_world_size))
+        # CP>1: any aligned subgroup of cp_size with room
+        for start in range(0, self.cp_world_size - cp_size + 1, cp_size):
+            group = range(start, start + cp_size)
+            if all(self.num_req_per_dp[r] < self.max_num_seqs for r in group):
+                return True
+        return False
+
     def __repr__(self) -> str:
-        return (f"RequestManager(cp_world_size={self.cp_world_size}"
-                + f"max_num_seqs={self.max_num_seqs}"
+        return (f"RequestManager(cp_world_size={self.cp_world_size}, "
                 + f"max_num_seqs={self.max_num_seqs}, "
                 + f"num_long_req_per_domain={self.num_long_req_per_domain}, "
                 + f"num_req_per_dp={self.num_req_per_dp})")
@@ -176,18 +253,84 @@ class CrossDPScheduler(Scheduler):
         self.max_cp_tokens = self.vllm_config.scheduler_config.num_cp_seqs
         self.graph_size_for_cp = self.vllm_config.compilation_config.cudagraph_capture_sizes_for_cp
         assert self.max_cp_tokens >= self.graph_size_for_cp, "max_cp_tokens should be greater than or equal to graph_size_for_cp"
-        # Request queue control the token threshold for long requests.
-        _thresh = int(os.environ.get("VLLM_LONG_REQUEST_THRESHOLD",
-                                     128 * 1024))
+
+        # DyCP: threshold-based dynamic CP size
+        self.dycp_enabled = vllm_config.parallel_config.dycp_enabled
+        self.dycp_sorted_thresholds = (
+            vllm_config.parallel_config.dycp_sorted_thresholds
+            if self.dycp_enabled else []
+        )
+
+        # When DyCP is enabled, auto-align long_request_threshold with the
+        # minimum CP>1 threshold so that all CP requests are classified as
+        # "long" and subject to the num_cp_seqs limit. This prevents too many
+        # CP requests from running concurrently and exceeding CUDA graph
+        # capture sizes, which would cause fallback to eager mode.
+        _env_thresh = os.environ.get("VLLM_LONG_REQUEST_THRESHOLD")
+        if _env_thresh is not None:
+            _thresh = int(_env_thresh)
+        elif self.dycp_enabled and self.dycp_sorted_thresholds:
+            _thresh = 128 * 1024  # default fallback
+            for thresh, cp_size in self.dycp_sorted_thresholds:
+                if cp_size > 1:
+                    _thresh = thresh
+                    break
+            logger.info(
+                "CrossDPScheduler: DyCP enabled, auto-setting "
+                "long_request_threshold=%d (min CP>1 threshold)", _thresh)
+        else:
+            _thresh = 128 * 1024
         logger.info("CrossDPScheduler: long_request_threshold=%d", _thresh)
         self.waiting = LongShortRequestQueue(
             long_request_threshold=_thresh,
             max_long_requests=self.max_cp_tokens,
+            dycp_sorted_thresholds=self.dycp_sorted_thresholds if self.dycp_enabled else None,
         )
         self.request_manager = RequestManager(
             cp_world_size=self.cp_world_size,
             max_num_seqs=self.max_num_running_reqs,
         )
+        # Allow the queue to check per-CP-size slot availability under DyCP.
+        if self.dycp_enabled:
+            self.waiting._request_manager = self.request_manager
+        # Track which requests are currently registered in request_manager
+        # and counted in running_long_count. Prevents double-decrement when
+        # a preempted request is later cancelled via finish_requests().
+        self._active_req_ids: set[str] = set()
+
+        # When a CP>1 request is preempted, cp_ranks is cleared so the
+        # re-scheduled request goes through DyCP-aware rank selection.
+        # Save the original cp_ranks here so that _free_request can still
+        # notify the correct worker ranks if the request is later cancelled.
+        self._preempted_cp_ranks: dict[str, list[int]] = {}
+
+        # Escape hatch for dycp_has_decode deadlock: track whether decode
+        # requests are making progress. If decode stalls for
+        # _DYCP_STALL_LIMIT consecutive steps (zero new tokens computed),
+        # force-allow prefills to prevent permanent deadlock.
+        self._dycp_stall_count: int = 0
+        self._last_decode_computed: int = 0
+
+        # Diagnostics: track zero-progress steps to detect hangs
+        self._zero_progress_steps: int = 0
+        self._last_total_computed: int = 0
+
+    def _is_long_request(self, request: Request) -> bool:
+        """Classify a request as long or short, applying PD overrides.
+
+        PD decode requests always use CP=1 (single rank). PD prefill
+        requests without DyCP also use CP=1 because the decode side
+        loads KV with cp_world_size=1. When DyCP is enabled, the
+        threshold logic determines the correct cp_size.
+        """
+        is_long = self.waiting.is_long_request(request)
+        kv_params = request.kv_transfer_params
+        if kv_params and kv_params.get("do_remote_prefill"):
+            is_long = False
+        elif kv_params and kv_params.get("do_remote_decode"):
+            if not self.dycp_enabled:
+                is_long = False
+        return is_long
 
     def _update_after_schedule(
         self,
@@ -207,8 +350,22 @@ class CrossDPScheduler(Scheduler):
             request = self.requests[req_id]
             if len(request.cp_ranks) == 1:
                 request.num_computed_tokens += num_scheduled_token
-            elif len(request.cp_ranks) > 1 and scheduler_output.cp_rank == 0:
+            elif (len(request.cp_ranks) > 1
+                  and scheduler_output.cp_rank == request.cp_ranks[0]):
+                # Only update on the first rank of the CP group to avoid
+                # double-counting. Must use cp_ranks[0] (first rank in
+                # the CP subgroup), not global rank 0 — e.g., a CP=4
+                # request on ranks [4,5,6,7] has cp_ranks[0]=4.
                 request.num_computed_tokens += num_scheduled_token
+            elif len(request.cp_ranks) == 0:
+                # Should not happen: scheduled requests always have
+                # cp_ranks set. If reached, the request will hang
+                # because num_computed_tokens never advances.
+                logger.warning(
+                    "Scheduled request %s has empty cp_ranks — "
+                    "num_computed_tokens will not be updated",
+                    req_id,
+                )
 
             # NOTE: _free_encoder_inputs relies on num_computed_tokens, which
             # may be updated again in _update_from_output for speculative
@@ -226,27 +383,35 @@ class CrossDPScheduler(Scheduler):
     def _free_request(self, request: Request) -> dict[str, Any] | None:
         assert request.is_finished()
 
-        """
-        TODO(AoChen): If the req is removed from the running queue, 
-        1. the running_long_count should be decremented.
-        2. the request manager should be updated.
-        3. the has_slot_for_long_request should be updated.
-        """
-        # PD decode requests are classified as short (CP=1) at schedule time,
-        # so they must also be classified as short at free time to keep
-        # running_long_count consistent.
-        kv_params = request.kv_transfer_params
-        is_long = (self.waiting.is_long_request(request)
-                   and not (kv_params and kv_params.get("do_remote_prefill")))
-        self.waiting.running_long_count -= 1 if is_long else 0
-        self.request_manager.free_req(request)
-        self.waiting.has_slot_for_long_request = self.request_manager.has_slot_for_long_request()
+        # Only decrement running_long_count and free from request_manager
+        # if the request is still registered as active. Preempted requests
+        # are already unregistered during preemption; calling this again
+        # from finish_requests() would cause double-decrement.
+        if request.request_id in self._active_req_ids:
+            self._active_req_ids.discard(request.request_id)
+            # PD requests are classified as short (CP=1) at schedule time,
+            # so they must also be classified as short at free time to keep
+            # running_long_count consistent.
+            if not self.dycp_enabled:
+                is_long = self._is_long_request(request)
+                self.waiting.running_long_count -= 1 if is_long else 0
+                self.waiting.has_slot_for_long_request = \
+                    self.request_manager.has_slot_for_long_request()
+            self.request_manager.free_req(request)
 
         delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)
         request_id = request.request_id
-        for cp_rank in request.cp_ranks:    
+        # Use saved preempted cp_ranks if the request was preempted
+        # (which clears cp_ranks). This ensures worker ranks are
+        # notified that the request is finished even if it was
+        # cancelled while in the preempted/waiting state.
+        finished_cp_ranks = request.cp_ranks or self._preempted_cp_ranks.pop(
+            request_id, [])
+        for cp_rank in finished_cp_ranks:
             self.finished_req_ids[cp_rank].add(request_id)
+        # Clean up saved cp_ranks if they were used
+        self._preempted_cp_ranks.pop(request_id, None)
 
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
@@ -255,6 +420,48 @@ class CrossDPScheduler(Scheduler):
             self._free_blocks(request)
 
         return kv_xfer_params
+
+    def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        """Reset the KV prefix cache with DyCP-aware request cleanup.
+
+        Overrides the base class to properly clean up DyCP state
+        (request_manager counters, _active_req_ids, _preempted_cp_ranks,
+        cp_ranks) when preempting running requests. Without this override,
+        the base class _preempt_request does not call request_manager.free_req,
+        causing counter corruption on re-scheduling.
+        """
+        if reset_running_requests:
+            timestamp = time.monotonic()
+            while self.running:
+                request = self.running.pop()
+                # DyCP-aware cleanup: same as the normal preemption path
+                # in schedule().
+                if request.request_id in self._active_req_ids:
+                    self._active_req_ids.discard(request.request_id)
+                    if not self.dycp_enabled:
+                        is_long = self._is_long_request(request)
+                        self.waiting.running_long_count -= (
+                            1 if is_long else 0)
+                    self.request_manager.free_req(request)
+                if request.cp_ranks:
+                    self._preempted_cp_ranks[request.request_id] = (
+                        list(request.cp_ranks))
+                    request.cp_ranks = []
+                self._preempt_request(request, timestamp)
+                request.num_output_placeholders = 0
+                request.discard_latest_async_tokens = True
+            self.prev_step_scheduled_req_ids.clear()
+
+        reset_successful = self.kv_cache_manager.reset_prefix_cache()
+        if reset_running_requests and not reset_successful:
+            raise RuntimeError(
+                "Failed to reset KV cache even when all the running "
+                "requests are preempted and moved to the waiting queue.")
+        if reset_connector and self.connector is not None:
+            self.connector.reset()
+        return reset_successful
 
     def has_finished_requests(self) -> bool:
         return sum(len(sub_ids) for sub_ids in self.finished_req_ids) > 0
@@ -270,14 +477,11 @@ class CrossDPScheduler(Scheduler):
             self.connector.bind_connector_metadata(None)
 
         for req_id in kv_connector_output.finished_recving or ():
-            logger.debug("Finished recving KV transfer for request %s",
-                         req_id)
             self.finished_recving_kv_req_ids.add(req_id)
         for req_id in kv_connector_output.finished_sending or ():
             if req_id in self.requests:
-                logger.debug(
-                    "Finished sending KV transfer for request %s", req_id)
-                self._free_blocks(self.requests[req_id])
+                req = self.requests[req_id]
+                self._free_blocks(req)
             else:
                 logger.debug(
                     "Skipping finished_sending for already-freed %s",
@@ -313,10 +517,8 @@ class CrossDPScheduler(Scheduler):
         model_runner_outputs: list[ModelRunnerOutput],
     ) -> dict[int, EngineCoreOutputs]:
 
-        """
-        Due to we use example connector now, many stats are None. 
-        So, the scheduler_stats only contain the last dp stats.
-        """
+        """When using example connector, many stats are None, so
+        scheduler_stats only contains the last DP stats."""
         processed_request: list[str] = []
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         
@@ -340,13 +542,14 @@ class CrossDPScheduler(Scheduler):
             )
             if kv_connector_stats and self.connector:
                 kv_stats = self.connector.get_kv_connector_stats()
-                assert kv_stats is None, "Where example connector kv_stats is None, if not, implemented it"
+                assert kv_stats is None, (
+                    "kv_stats must be None for the example connector; "
+                    "implement aggregation if needed")
                 if kv_stats:
                     kv_connector_stats = kv_connector_stats.aggregate(kv_stats)
 
             failed_kv_load_req_ids = None
             if kv_connector_output and kv_connector_output.invalid_block_ids:
-                assert False, "This is unreachable"
                 # These blocks contain externally computed tokens that failed to
                 # load. Identify affected requests and adjust their computed token
                 # count to trigger recomputation of the invalid blocks.
@@ -572,6 +775,38 @@ class CrossDPScheduler(Scheduler):
         num_scheduled_tokens: list[dict[str, int]] = [{} for _ in range(self.cp_world_size)]
         cp_rank_scheduled_tokens: list[dict[str, int]] = [{} for _ in range(self.cp_world_size)]
 
+        # DyCP: track per-request cp_size for the output.
+        # Pre-populate from ALL running requests so that actual_cp_size
+        # is correct even if some running requests are skipped in the
+        # scheduling loop (e.g. num_new_tokens == 0 due to budget
+        # exhaustion or async scheduling).
+        per_req_cp_sizes: dict[str, int] = {}
+        if self.dycp_enabled:
+            for req in self.running:
+                if len(req.cp_ranks) > 1:
+                    per_req_cp_sizes[req.request_id] = len(req.cp_ranks)
+
+        # DyCP: enforce single CP>1 size per batch. The NCCL all-gather/
+        # all-reduce in both prefill and decode paths uses a single
+        # actual_cp_size for the entire batch. Mixing different CP>1 sizes
+        # would cause the wrong NCCL subgroup to be used for some requests.
+        # This constraint matches the design doc: "优先实现一个batch里面
+        # 只会有一个size的CP".
+        # Initialize from ALL RUNNING CP>1 requests (both prefill and decode).
+        # Decode must be included because the NCCL all-reduce in the decode
+        # path uses actual_cp_size for subgroup selection. If CP=4 decode
+        # and CP=2 decode run in the same batch, actual_cp_size=max(4,2)=4,
+        # causing CP=2 ranks to use get_dycp_subgroup(4) which includes
+        # idle ranks that don't participate in the all-reduce → deadlock.
+        dycp_batch_cp_size: int = 0
+        if self.dycp_enabled:
+            running_cp_sizes = {
+                len(req.cp_ranks) for req in self.running
+                if len(req.cp_ranks) > 1
+            }
+            if running_cp_sizes:
+                dycp_batch_cp_size = max(running_cp_sizes)
+
         # Per-rank token budgets: each rank can process up to
         # max_num_scheduled_tokens.  CP requests split tokens across ranks,
         # so their per-rank cost is num_tokens / cp_size.
@@ -655,7 +890,7 @@ class CrossDPScheduler(Scheduler):
             )
 
             """
-            TODO(AoChen): Long prefill token threshold is not implemented yet. We temparily ignore this for decode instance.
+            TODO(AoChen): Long prefill token threshold is not implemented yet. We temporarily ignore this for decode instance.
             """
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
@@ -673,18 +908,22 @@ class CrossDPScheduler(Scheduler):
             """
 
             if num_new_tokens == 0:
-                # The request cannot be scheduled because one of the following
-                # reasons:
-                # 1. No new tokens to schedule. This may happen when
-                #    (1) PP>1 and we have already scheduled all prompt tokens
-                #    but they are not finished yet.
-                #    (2) Async scheduling and the request has reached to either
-                #    its max_total_tokens or max_model_len.
-                # 2. The encoder budget is exhausted.
-                # 3. The encoder cache is exhausted.
-                # NOTE(woosuk): Here, by doing `continue` instead of `break`,
-                # we do not strictly follow the FCFS scheduling policy and
-                # allow the lower-priority requests to be scheduled.
+                # Warn for prefill requests stuck at computed=0
+                # (critical hang indicator).
+                kv_params = request.kv_transfer_params
+                is_pd_decode = (
+                    kv_params and kv_params.get("do_remote_prefill"))
+                if (request.num_computed_tokens == 0
+                        and request.num_prompt_tokens > 0
+                        and not is_pd_decode):
+                    logger.warning(
+                        "Prefill req=%s stuck at computed=0, "
+                        "num_prompt=%d cp_ranks=%s running=%d",
+                        request.request_id,
+                        request.num_prompt_tokens,
+                        request.cp_ranks,
+                        len(self.running),
+                    )
                 req_index += 1
                 continue
 
@@ -697,7 +936,8 @@ class CrossDPScheduler(Scheduler):
                         num_new_tokens,
                         num_lookahead_tokens=self.num_lookahead_tokens,
                     )
-                    logger.debug(f"new_blocks: {new_blocks}, request.cp_ranks: {request.cp_ranks}, num_new_tokens: {num_new_tokens}")
+                    logger.debug("new_blocks: %s, request.cp_ranks: %s, num_new_tokens: %s",
+                                 new_blocks, request.cp_ranks, num_new_tokens)
                     if new_blocks is not None:
                         # The request can be scheduled.
                         break
@@ -711,23 +951,47 @@ class CrossDPScheduler(Scheduler):
                         raise NotImplementedError
                     else:
                         preempted_req = self.running.pop()
-                        """
-                        TODO(AoChen): Preempted request is also need to be removed from the request manager.
-                        """
+                        if len(preempted_req.cp_ranks) > 1:
+                            # Cannot preempt CP>1 requests (would leave
+                            # other ranks in the CP group in an
+                            # inconsistent state).  Put it back and
+                            # search for a CP=1 request instead.
+                            self.running.append(preempted_req)
+                            preempted_req = None
+                            # Search backward (lowest priority first)
+                            # for a preemptible CP=1 request.
+                            for i in range(len(self.running) - 1,
+                                           -1, -1):
+                                if len(self.running[i].cp_ranks) <= 1:
+                                    preempted_req = self.running.pop(i)
+                                    break
+                            if preempted_req is None:
+                                logger.warning(
+                                    "Cannot preempt: all running "
+                                    "requests are CP>1. Waiting "
+                                    "for one to finish.")
+                                break
+                        self._active_req_ids.discard(preempted_req.request_id)
                         self.request_manager.free_req(preempted_req)
-                        _kv_params = preempted_req.kv_transfer_params
-                        _is_long = (self.waiting.is_long_request(preempted_req)
-                                    and not (_kv_params and _kv_params.get("do_remote_prefill")))
-                        self.waiting.running_long_count -= 1 if _is_long else 0
-                        self.waiting.has_slot_for_long_request = self.request_manager.has_slot_for_long_request()
+                        if not self.dycp_enabled:
+                            _is_long = self._is_long_request(preempted_req)
+                            self.waiting.running_long_count -= 1 if _is_long else 0
+                            self.waiting.has_slot_for_long_request = self.request_manager.has_slot_for_long_request()
 
                     self._preempt_request(preempted_req, scheduled_timestamp)
-                    
-                    if len(preempted_req.cp_ranks) > 1:
-                        raise RuntimeError("Preempted request has multiple CP ranks is not supported now.")
-                    
+
                     for rank in preempted_req.cp_ranks:
                         preempted_reqs[rank].append(preempted_req)
+                    # Save original cp_ranks before clearing so that
+                    # _free_request can notify the correct worker ranks
+                    # if the request is later cancelled while preempted.
+                    if preempted_req.cp_ranks:
+                        self._preempted_cp_ranks[preempted_req.request_id] = (
+                            list(preempted_req.cp_ranks))
+                    # Clear cp_ranks so the re-scheduled request goes
+                    # through DyCP-aware rank selection instead of
+                    # trying stale ranks that may now be occupied.
+                    preempted_req.cp_ranks = []
 
                     # preempted_reqs.append(preempted_req)
                     if preempted_req == request:
@@ -745,9 +1009,98 @@ class CrossDPScheduler(Scheduler):
                 req_to_new_blocks[rank][request.request_id] = new_blocks[i]
                 num_scheduled_tokens[rank][request.request_id] = num_new_tokens
                 cp_rank_scheduled_tokens[rank][request.request_id] = len(request.cp_ranks)
-            
+
+            # DyCP: record cp_size for running requests
+            if self.dycp_enabled:
+                per_req_cp_sizes[request.request_id] = len(request.cp_ranks)
+
             _deduct_budget(request.cp_ranks, num_new_tokens)
             req_index += 1
+
+        # DyCP: when CP>1 decode is running, defer new prefills to avoid
+        # mixing prefill and CP>1 decode across DP ranks. The MoE all-to-all
+        # forces all ranks to synchronize, so decode ranks would wait for
+        # slower prefill ranks, degrading TPOT from ~7ms to ~80ms.
+        # When only CP=1 decode is running, prefills are not deferred because
+        # CP=1 ranks are independent DP ranks — the MoE sync behavior matches
+        # the non-DyCP DP baseline, and mixing is safe (same as baseline).
+        # ESCAPE HATCH: if decode makes zero progress for
+        # _DYCP_STALL_LIMIT consecutive steps (stuck due to NCCL hang,
+        # KV transfer stall, etc.), force-allow prefills to prevent
+        # permanent deadlock. We track total computed tokens of decode
+        # requests to distinguish normal progress from a true stall.
+        dycp_has_decode = (
+            self.dycp_enabled
+            and any(
+                req.num_computed_tokens >= req.num_prompt_tokens
+                for req in self.running
+            )
+        )
+        if dycp_has_decode:
+            total_decode_computed = sum(
+                req.num_computed_tokens
+                for req in self.running
+                if req.num_computed_tokens >= req.num_prompt_tokens
+            )
+            if total_decode_computed == self._last_decode_computed:
+                self._dycp_stall_count += 1
+            else:
+                self._dycp_stall_count = 0
+            self._last_decode_computed = total_decode_computed
+        else:
+            self._dycp_stall_count = 0
+            self._last_decode_computed = 0
+        # Only defer prefills when CP>1 decode is running. CP=1-only decode
+        # does not need deferral — its MoE all-to-all behavior is identical
+        # to the non-DyCP DP baseline where prefill/decode mixing is allowed.
+        dycp_has_cp_decode = (
+            self.dycp_enabled
+            and any(
+                len(req.cp_ranks) > 1
+                and req.num_computed_tokens >= req.num_prompt_tokens
+                for req in self.running
+            )
+        )
+        dycp_defer_prefills = (
+            dycp_has_cp_decode
+            and self._dycp_stall_count < _DYCP_STALL_LIMIT
+        )
+        # Check if any running request is a CP>1 prefill (still computing
+        # prompt tokens). PD decode requests must wait for these to finish
+        # to avoid being forced into a CP>1 batch.
+        dycp_has_cp_prefill = (
+            self.dycp_enabled
+            and any(
+                len(req.cp_ranks) > 1
+                and req.num_computed_tokens < req.num_prompt_tokens
+                for req in self.running
+            )
+        )
+        if dycp_has_decode and self._dycp_stall_count >= _DYCP_STALL_LIMIT:
+            logger.warning(
+                "DyCP decode stall detected (%d steps with zero progress): "
+                "force-allowing prefills despite active decode. "
+                "Decode may be stuck (NCCL hang or KV transfer stall).",
+                self._dycp_stall_count)
+
+        # Zero-progress hang detection
+        total_computed = sum(
+            req.num_computed_tokens for req in self.running)
+        if total_computed == self._last_total_computed and self.running:
+            self._zero_progress_steps += 1
+        else:
+            self._zero_progress_steps = 0
+        self._last_total_computed = total_computed
+        if self._zero_progress_steps > 0 and self._zero_progress_steps % 100 == 0:
+            logger.warning(
+                "Zero progress for %d steps: "
+                "has_decode=%s has_cp_decode=%s has_cp_prefill=%s "
+                "stall_count=%d running=%d waiting=%d",
+                self._zero_progress_steps,
+                dycp_has_decode, dycp_has_cp_decode,
+                dycp_has_cp_prefill,
+                self._dycp_stall_count,
+                len(self.running), len(self.waiting))
 
         # Use a temporary RequestQueue to collect requests that need to be
         # skipped and put back at the head of the waiting queue later
@@ -756,38 +1109,84 @@ class CrossDPScheduler(Scheduler):
         # Next, schedule the WAITING requests.
         if not any(preempted_reqs):
             while self.waiting and max(rank_budgets) > 0:
-                if len(self.running) == (
-                    (self.max_num_running_reqs - self.waiting.running_long_count) * self.cp_world_size + self.waiting.running_long_count
-                ):
+                # Capacity check: break if no rank has room for any request.
+                # Under DyCP, the old formula (assuming each long request
+                # occupies all cp_world_size ranks) is too conservative.
+                # Use per-rank counts from request_manager instead.
+                if all(self.request_manager.num_req_per_dp[i] >= self.request_manager.max_num_seqs
+                       for i in range(self.cp_world_size)):
                     break
                 request = self.waiting.peek_request()
                 if request is None:
                     break
 
-                is_long = self.waiting.is_long_request(request)
+                is_long = self._is_long_request(request)
 
-                # PD decode requests always use CP=1 (single rank)
                 kv_params = request.kv_transfer_params
-                if kv_params and kv_params.get("do_remote_prefill"):
-                    is_long = False
 
-                if len(request.cp_ranks) == 0:
-                    selected_dp = self.request_manager.select_dp(
-                        request, is_long,
-                        rank_budgets=rank_budgets,
+                # DyCP: determine cp_size from thresholds
+                req_cp_size = 1
+                if self.dycp_enabled:
+                    num_prompt_tokens = request.num_tokens - request.num_output_tokens
+                    req_cp_size = get_cp_size_for_request(
+                        num_prompt_tokens, self.dycp_sorted_thresholds
                     )
-                else:
-                    selected_dp = self.request_manager.select_dp(
-                        request, is_long,
-                        rank_budgets=rank_budgets,
-                    )
+                    # PD decode requests always run on a single rank (CP=1).
+                    # KV is loaded via IPC from prefill ranks; no CP
+                    # communication is needed during decode.
+                    if kv_params and kv_params.get("do_remote_prefill"):
+                        req_cp_size = 1
+                    # When CP>1 decode is running, defer new prefill requests
+                    # to avoid MoE all-to-all sync bottleneck across
+                    # mixed-phase DP ranks.
+                    # PD decode requests (do_remote_prefill) load KV via IPC
+                    # memory copy, not a full prefill forward pass, so they
+                    # don't cause MoE sync issues and should not be deferred.
+                    # After _DYCP_DEFER_LIMIT consecutive deferrals, force-
+                    # allow prefills to prevent deadlock when decode is stuck.
+                    if (dycp_defer_prefills and num_prompt_tokens > 0
+                            and not (kv_params
+                                     and kv_params.get("do_remote_prefill"))):
+                        self.waiting.pop_request()
+                        skipped_waiting_requests.prepend_request(request)
+                        continue
+                    # When CP>1 prefill is running, defer PD decode requests.
+                    # PD decode runs with CP=1 (KV loaded to a single rank),
+                    # but mixing it in a CP>1 batch forces wrong actual_cp_size.
+                    if (kv_params and kv_params.get("do_remote_prefill")
+                            and dycp_has_cp_prefill):
+                        self.waiting.pop_request()
+                        skipped_waiting_requests.prepend_request(request)
+                        continue
+                    # Enforce single CP>1 size per batch: if a CP>1
+                    # request was already scheduled with a different
+                    # cp_size, defer this request to avoid mixing CP
+                    # sizes in the same NCCL all-gather/all-reduce.
+                    if (req_cp_size > 1
+                            and dycp_batch_cp_size > 0
+                            and req_cp_size != dycp_batch_cp_size):
+                        self.waiting.pop_request()
+                        skipped_waiting_requests.prepend_request(request)
+                        continue
+
+                selected_dp = self.request_manager.select_dp(
+                    request, is_long,
+                    rank_budgets=rank_budgets,
+                    cp_size=req_cp_size if self.dycp_enabled else 0,
+                )
                 if selected_dp is None:
-                    break
+                    # No aligned subgroup available for this CP>1
+                    # request. Skip it and try the next request (which
+                    # may be CP=1 and fit on an available rank) rather
+                    # than breaking the entire waiting loop.
+                    self.waiting.pop_request()
+                    skipped_waiting_requests.prepend_request(request)
+                    continue
                 
                 if len(selected_dp) > 1:
-                    logger.info(f"It's a cp req, selected_dp: {selected_dp}, request id: {request.request_id}")
+                    logger.debug("CP req: selected_dp=%s, request_id=%s", selected_dp, request.request_id)
                 else:
-                    logger.info(f"It's a short req, selected_dp: {selected_dp}, request id: {request.request_id}")
+                    logger.debug("Short req: selected_dp=%s, request_id=%s", selected_dp, request.request_id)
 
                 # KVTransfer: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
@@ -795,24 +1194,12 @@ class CrossDPScheduler(Scheduler):
                     if is_ready:
                         request.status = RequestStatus.WAITING
                     else:
-                        logger.debug(
-                            "%s is still in WAITING_FOR_REMOTE_KVS state.",
-                            request.request_id,
-                        )
                         self.waiting.pop_request()
                         skipped_waiting_requests.prepend_request(request)
                         continue
 
                 # Skip request if the structured output request is still waiting
                 # for FSM compilation.
-                # if request.status == RequestStatus.WAITING_FOR_FSM:
-                #     structured_output_req = request.structured_output_request
-                #     if structured_output_req and structured_output_req.grammar:
-                #         request.status = RequestStatus.WAITING
-                #     else:
-                #         self.waiting.pop_request()
-                #         skipped_waiting_requests.prepend_request(request)
-                #         continue
 
                 num_external_computed_tokens = 0
                 load_kv_async = False
@@ -853,10 +1240,6 @@ class CrossDPScheduler(Scheduler):
                     new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
                     num_new_local_computed_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
-
-                # encoder_inputs_to_schedule = None
-                # external_load_encoder_input = []
-                # new_encoder_compute_budget = encoder_compute_budget
 
                 if load_kv_async:
                     # KVTransfer: loading remote KV, do not allocate for new work.
@@ -927,7 +1310,8 @@ class CrossDPScheduler(Scheduler):
                     delay_cache_blocks=load_kv_async,
                     num_encoder_tokens=num_encoder_tokens,
                 )
-                logger.debug(f"new_blocks -- 2: {new_blocks}, request.cp_ranks: {request.cp_ranks}, num_new_tokens: {num_new_tokens}")
+                logger.debug("new_blocks: %s, request.cp_ranks: %s, num_new_tokens: %s",
+                             new_blocks, request.cp_ranks, num_new_tokens)
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     break
@@ -937,6 +1321,10 @@ class CrossDPScheduler(Scheduler):
                 # This information is used to determine if a load is
                 # needed for this request.
                 request.cp_ranks = selected_dp
+                if self.dycp_enabled:
+                    per_req_cp_sizes[request.request_id] = req_cp_size
+                    if req_cp_size > 1 and dycp_batch_cp_size == 0:
+                        dycp_batch_cp_size = req_cp_size
 
                 """
                 TODO(AoChen): update_state_after_alloc(PD disagg) is not implemented yet.
@@ -944,7 +1332,7 @@ class CrossDPScheduler(Scheduler):
                 if self.connector is not None:
                     """
                         In the example connector, new_computed_blocks + new_blocks is not used,
-                        So, temparily ignore it.
+                        so temporarily ignore it.
                     """
                     self.connector.update_state_after_alloc(
                         request=request,
@@ -966,9 +1354,14 @@ class CrossDPScheduler(Scheduler):
                 self._update_connector_prefix_cache_stats(request)
                 
                 self.running.append(request)
-                self.waiting.running_long_count += 1 if is_long else 0
+                self._active_req_ids.add(request.request_id)
+                # Clean up saved preempted cp_ranks since the request
+                # has been re-scheduled with new cp_ranks.
+                self._preempted_cp_ranks.pop(request.request_id, None)
+                if not self.dycp_enabled:
+                    self.waiting.running_long_count += 1 if is_long else 0
+                    self.waiting.has_slot_for_long_request = self.request_manager.has_slot_for_long_request()
                 self.request_manager.add_req(request)
-                self.waiting.has_slot_for_long_request = self.request_manager.has_slot_for_long_request()
 
                 if self.log_stats:
                     request.record_event(
@@ -1021,9 +1414,10 @@ class CrossDPScheduler(Scheduler):
         assert all(b >= 0 for b in rank_budgets), (
             f"rank_budgets underflow: {rank_budgets}"
         )
-        assert len(self.running) <= (
-            (self.max_num_running_reqs - self.waiting.running_long_count) * self.cp_world_size + self.waiting.running_long_count
-        )
+        # Under DyCP, a CP>1 request only occupies cp_size ranks (not all
+        # cp_world_size), so the total unique request count is bounded by
+        # max_num_seqs * cp_world_size (all CP=1 scenario).
+        assert len(self.running) <= self.max_num_running_reqs * self.cp_world_size
         
         total_scheduled = (
             len(list(chain.from_iterable(scheduled_new_reqs)))
@@ -1071,8 +1465,19 @@ class CrossDPScheduler(Scheduler):
 
         none_tokens_in_peer_sched = all([sum(num_scheduled_tokens[idx].values()) == 0 for idx in range(self.cp_world_size)])
 
+        # DyCP: compute batch-level actual_cp_size (max across all scheduled reqs)
+        # Only meaningful when DyCP is enabled; non-DyCP batches use cp_size=1.
+        if self.dycp_enabled and per_req_cp_sizes:
+            actual_cp_size = max(per_req_cp_sizes.values())
+        else:
+            actual_cp_size = 1
+        if self.dycp_enabled and actual_cp_size > 1:
+            logger.debug("DyCP: actual_cp_size=%d, per_req_cp_sizes=%s",
+                         actual_cp_size,
+                         {k: v for k, v in per_req_cp_sizes.items() if v > 1})
+
         for idx in range(self.cp_world_size):
-            
+
             if sum(num_scheduled_tokens[idx].values()) == 0 and len(preempted_reqs[idx]) == 0 and len(self.finished_req_ids[idx]) == 0:
                 scheduler_output = SchedulerOutput.make_empty()
                 scheduler_output.none_tokens_in_peer_sched = none_tokens_in_peer_sched
@@ -1097,6 +1502,8 @@ class CrossDPScheduler(Scheduler):
                         cp_rank=idx,
                         cp_rank_scheduled_tokens=cp_rank_scheduled_tokens[idx],
                         num_cp_request=sum([1 if cp_size > 1 else 0 for cp_size in  cp_rank_scheduled_tokens[idx].values()]),
+                        actual_cp_size=actual_cp_size,
+                        per_req_cp_sizes=per_req_cp_sizes if self.dycp_enabled else None,
                         none_tokens_in_peer_sched=none_tokens_in_peer_sched
                     )
                 )
@@ -1113,8 +1520,22 @@ class CrossDPScheduler(Scheduler):
                 )
                 scheduler_output.kv_connector_metadata = meta
 
+            # Free blocks for orphaned prefill requests whose decode
+            # partner never arrived (timed out via orphan cleanup in
+            # build_connector_meta). Without this, blocks leak forever.
+            if hasattr(self.connector, '_orphaned_prefill_ids_to_free'):
+                for req_id in self.connector._orphaned_prefill_ids_to_free:
+                    if req_id in self.requests:
+                        logger.info(
+                            "Freeing orphaned prefill blocks for %s", req_id)
+                        self._free_blocks(self.requests[req_id])
+                    else:
+                        logger.debug(
+                            "Skipping orphaned prefill free for %s "
+                            "(already freed)", req_id)
+                self.connector._orphaned_prefill_ids_to_free.clear()
+
         with record_function_or_nullcontext("schedule: update_after_schedule"):
-            # self._update_after_schedule(scheduler_output)
             for scheduler_output in total_scheduler_output:
                 if scheduler_output is None:
                     continue

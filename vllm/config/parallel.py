@@ -274,6 +274,14 @@ class ParallelConfig:
         should only be set by API server scale-out.
     """
 
+    cp_size_thresholds: list[tuple[int, int]] = Field(default_factory=list)
+    """DyCP threshold configuration: list of (token_threshold, cp_size) tuples.
+    Requests with token count >= threshold use the corresponding cp_size.
+    All cp_size values must be powers of 2 and factors of dp_per_domain.
+    Example: [(4096, 1), (16384, 4), (32768, 8)] means:
+      <4K tokens → CP=1, 4K-16K → CP=1, 16K-32K → CP=4, >=32K → CP=8
+    When non-empty, DyCP is enabled and PCP=DCP=1."""
+
     dp_per_domain: int = Field(default=1, ge=-1)
     """Number of data parallel groups per domain."""
 
@@ -285,6 +293,30 @@ class ParallelConfig:
     """Domain parallel start rank."""
     domain_parallel_start_rank_local: int = Field(default=0, ge=-1)
     """Domain parallel start rank local."""
+
+    @property
+    def dycp_enabled(self) -> bool:
+        return len(self.cp_size_thresholds) > 0
+
+    @property
+    def dycp_sorted_thresholds(self) -> list[tuple[int, int]]:
+        """Returns cp_size_thresholds sorted by token_threshold ascending."""
+        return sorted(self.cp_size_thresholds, key=lambda x: x[0])
+
+    @property
+    def dycp_all_cp_sizes(self) -> list[int]:
+        """Returns sorted unique cp_size values from thresholds."""
+        if not self.dycp_enabled:
+            return []
+        sizes = sorted(set(cs for _, cs in self.cp_size_thresholds))
+        return sizes
+
+    @property
+    def dycp_max_cp_size(self) -> int:
+        """Returns the maximum cp_size across all thresholds."""
+        if not self.dycp_enabled:
+            return 1
+        return max(cs for _, cs in self.cp_size_thresholds)
 
     @model_validator(mode="after")
     def _validate_parallel_config(self) -> Self:
@@ -328,6 +360,39 @@ class ParallelConfig:
                     "enabled. Either enable EPLB or unset "
                     "num_redundant_experts."
                 )
+
+        if self.dycp_enabled:
+            if self.prefill_context_parallel_size != 1:
+                raise ValueError(
+                    "DyCP is mutually exclusive with PCP. "
+                    f"Got prefill_context_parallel_size="
+                    f"{self.prefill_context_parallel_size} but "
+                    "cp_size_thresholds is non-empty."
+                )
+            if self.decode_context_parallel_size != 1:
+                raise ValueError(
+                    "DyCP is mutually exclusive with DCP. "
+                    f"Got decode_context_parallel_size="
+                    f"{self.decode_context_parallel_size} but "
+                    "cp_size_thresholds is non-empty."
+                )
+            if self.dp_per_domain <= 0:
+                raise ValueError(
+                    "dp_per_domain must be > 0 when DyCP is enabled, "
+                    f"got {self.dp_per_domain}"
+                )
+            for threshold, cp_size in self.cp_size_thresholds:
+                if cp_size < 1 or (cp_size & (cp_size - 1)) != 0:
+                    raise ValueError(
+                        f"cp_size must be a power of 2, got {cp_size} "
+                        f"in threshold ({threshold}, {cp_size})"
+                    )
+                if self.dp_per_domain % cp_size != 0:
+                    raise ValueError(
+                        f"cp_size must be a factor of dp_per_domain "
+                        f"({self.dp_per_domain}), got {cp_size} "
+                        f"in threshold ({threshold}, {cp_size})"
+                    )
 
         return self
 

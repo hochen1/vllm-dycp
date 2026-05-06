@@ -326,6 +326,7 @@ class GPUModelRunner(
         self.cp_world_size = self.dcp_world_size * self.pcp_world_size
         self.dycp_world_size = self.parallel_config.dp_per_domain
         self.dycp_rank = 0 if self.dycp_world_size <= 1 else get_dycp_group().rank_in_group
+        self._per_req_cp_sizes_np: "np.ndarray | None" = None
         if self.dycp_world_size > 1:
             self.cp_world_size = self.dycp_world_size
             self.cp_rank = self.dycp_rank
@@ -1406,12 +1407,15 @@ class GPUModelRunner(
         assert num_reqs > 0
         logger.debug(
             "prepare_inputs start "
-            "num_reqs=%d total_tokens=%d num_dycp_reqs=%d pcp_world=%d dycp_world=%d",
+            "num_reqs=%d total_tokens=%d num_dycp_reqs=%d pcp_world=%d dycp_world=%d "
+            "actual_cp_size=%d per_req_cp_sizes=%s",
             int(num_reqs),
             int(total_num_scheduled_tokens),
             int(num_dycp_reqs),
             int(self.pcp_world_size),
             int(self.dycp_world_size),
+            int(scheduler_output.actual_cp_size),
+            scheduler_output.per_req_cp_sizes,
         )
 
         # OPTIMIZATION: Start copying the block table first.
@@ -1426,6 +1430,9 @@ class GPUModelRunner(
         # recomputes everything with post-division values.
         # For DyCP pure decode (all CP query_len=1), no token splitting
         # happens, so we can use the standard path directly.
+        # NOTE: This assumes CP requests are at the front of the array
+        # (first num_cp_request entries). This is guaranteed by
+        # reorder_batch_to_split_cp_and_normal() which runs before this.
         _dycp_needs_pcp = (
             self.dycp_world_size > 1
             and scheduler_output.num_cp_request > 0
@@ -1447,9 +1454,6 @@ class GPUModelRunner(
                 arange,
                 out=positions_np,
             )
-
-        # self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
-        # self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens)
 
         if self.pcp_world_size > 1:
             num_scheduled_tokens[:num_reqs], pcp_positions = (
@@ -1506,6 +1510,7 @@ class GPUModelRunner(
                         self.arange_np,
                         scheduler_output.num_cp_request,
                         self.reorder_batch_threshold,
+                        effective_pcp_world_size=scheduler_output.actual_cp_size,
                     )
                 )
 
@@ -1626,7 +1631,29 @@ class GPUModelRunner(
                 output_idx += num_sched
 
         if self.dycp_world_size > 1:
-            self.input_batch.block_table.compute_domain_slot_mapping(req_indices, positions_np, scheduler_output.num_cp_request)
+            per_req_cp_sizes_np = None
+            if scheduler_output.num_cp_request > 0:
+                # Only build per_req_cp_sizes_np when there are CP>1 requests.
+                # When all requests are CP=1, per_req_cp_sizes_np is None and
+                # downstream code uses actual_cp_size=1 as fallback.
+                if scheduler_output.per_req_cp_sizes is not None:
+                    per_req_cp_sizes_np = np.ones(num_reqs, dtype=np.int32)
+                    for req_idx in range(num_reqs):
+                        req_id = self.input_batch.req_ids[req_idx]
+                        if req_id in scheduler_output.per_req_cp_sizes:
+                            per_req_cp_sizes_np[req_idx] = (
+                                scheduler_output.per_req_cp_sizes[req_id]
+                            )
+            self._per_req_cp_sizes_np = per_req_cp_sizes_np
+            # compute_domain_slot_mapping with num_dycp_reqs=0 correctly
+            # routes all requests through the non-interleaved DP path.
+            # Do NOT use compute_slot_mapping here: when total_cp_world_size>1
+            # it applies N-way interleave which is wrong for CP=1 requests.
+            self.input_batch.block_table.compute_domain_slot_mapping(
+                req_indices, positions_np,
+                scheduler_output.num_cp_request,
+                per_req_cp_sizes_np,
+            )
         else:
             self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
 
@@ -1668,6 +1695,7 @@ class GPUModelRunner(
                     num_scheduled_tokens=num_scheduled_tokens[:num_dycp_reqs],
                     num_reqs=num_dycp_reqs,
                     num_tokens_np=num_tokens_np[:num_dycp_reqs],
+                    effective_world_size=scheduler_output.actual_cp_size,
                 )
             )
             if num_dycp_reqs < num_reqs:
@@ -1718,14 +1746,15 @@ class GPUModelRunner(
             elif self.dycp_world_size > 1 and scheduler_output.num_cp_request > 0 and dycp_has_prefill:
                 num_dycp_tokens = sum(num_scheduled_tokens[:num_dycp_reqs])
                 logits_indices[:num_dycp_reqs] = self.pcp_manager.get_logits_indices(
-                    cu_num_tokens[:num_dycp_reqs], num_dycp_reqs
+                    cu_num_tokens[:num_dycp_reqs], num_dycp_reqs,
+                    effective_world_size=scheduler_output.actual_cp_size,
                 )
                 if num_dycp_reqs < num_reqs:
                     # NOTE: restored hidden_states still include padded DYCP
                     # slots, so the DP part should be shifted by gathered
                     # (padded) DYCP size rather than unpadded size.
                     dycp_allgathered_size = (
-                        cu_num_tokens[num_dycp_reqs - 1] * self.dycp_world_size
+                        cu_num_tokens[num_dycp_reqs - 1] * scheduler_output.actual_cp_size
                     )
                     logits_indices[num_dycp_reqs:] += (dycp_allgathered_size - num_dycp_tokens)
             num_draft_tokens = None
@@ -1794,6 +1823,8 @@ class GPUModelRunner(
         cascade_attn_prefix_lens: list[list[int]] | None = None,
         num_dycp_reqs: int = 0,
         num_dycp_tokens: int = 0,
+        actual_cp_size: int = 1,
+        dycp_has_prefill: bool | None = None,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
@@ -1911,14 +1942,27 @@ class GPUModelRunner(
             causal=True,
             num_dycp_reqs=num_dycp_reqs,
             num_dycp_tokens=num_dycp_tokens,
+            actual_cp_size=actual_cp_size,
         )
         if self.dycp_world_size > 1 and num_dycp_reqs > 0:
-            self.cp_local_seq_lens.cpu[:num_dycp_reqs] = get_cp_local_seq_lens(
-                self.seq_lens.cpu[:num_dycp_reqs],
-                self.dycp_world_size,
-                self.dycp_rank,
-                self.parallel_config.cp_kv_cache_interleave_size,
-            )
+            per_req_cp_sizes_np = self._per_req_cp_sizes_np
+            if per_req_cp_sizes_np is not None and num_dycp_reqs <= len(per_req_cp_sizes_np):
+                cp_ws_tensor = torch.from_numpy(
+                    per_req_cp_sizes_np[:num_dycp_reqs]
+                ).to(torch.int32)
+                self.cp_local_seq_lens.cpu[:num_dycp_reqs] = get_cp_local_seq_lens(
+                    self.seq_lens.cpu[:num_dycp_reqs],
+                    cp_ws_tensor,
+                    self.dycp_rank,
+                    self.parallel_config.cp_kv_cache_interleave_size,
+                )
+            else:
+                self.cp_local_seq_lens.cpu[:num_dycp_reqs] = get_cp_local_seq_lens(
+                    self.seq_lens.cpu[:num_dycp_reqs],
+                    actual_cp_size,
+                    self.dycp_rank % actual_cp_size,
+                    self.parallel_config.cp_kv_cache_interleave_size,
+                )
             self.cp_local_seq_lens.cpu[num_dycp_reqs:num_reqs].copy_(self.seq_lens.cpu[num_dycp_reqs:num_reqs])
             self.cp_local_seq_lens.cpu[num_reqs:].fill_(0)
             self.cp_local_seq_lens.copy_to_gpu(num_reqs_padded)
@@ -1956,9 +2000,16 @@ class GPUModelRunner(
             # pcp_allgather_restore_idx is only needed when PCP token
             # splitting was used (DyCP prefill). Pure decode has
             # num_dycp_tokens == num_dycp_reqs (1 token per request).
-            _dycp_has_prefill = num_dycp_tokens > num_dycp_reqs
-            if num_dycp_tokens > 0 and _dycp_has_prefill:
-                dycp_allgather_size = num_dycp_tokens * self.dycp_world_size
+            # Use pre-split dycp_has_prefill (from prepare_inputs,
+            # computed before update_tokens_for_pcp) when available,
+            # otherwise fall back to post-split token count comparison.
+            _has_prefill = (
+                dycp_has_prefill
+                if dycp_has_prefill is not None
+                else num_dycp_tokens > num_dycp_reqs
+            )
+            if num_dycp_tokens > 0 and _has_prefill:
+                dycp_allgather_size = num_dycp_tokens * actual_cp_size
                 cm_base.pcp_allgather_restore_idx = self.pcp_manager.pcp_allgather_restore_idx.gpu[
                     :dycp_allgather_size
                 ]
@@ -1975,6 +2026,85 @@ class GPUModelRunner(
             cm_base.dcp_local_seq_lens_cpu = cm_base.cp_local_seq_lens_cpu
             cm_base.dycp_local_seq_lens = cm_base.cp_local_seq_lens
             cm_base.dycp_local_seq_lens_cpu = cm_base.cp_local_seq_lens_cpu
+
+            # Compute full interleave slot_mapping for allgathered KV.
+            # DualChunkSwap assigns positions for compute load balancing, but
+            # the interleave-based slot_mapping only writes the intersection of
+            # DualChunkSwap and interleave positions. After KV allgather, each
+            # rank has full KV data — this slot_mapping writes ALL interleave-
+            # assigned positions to paged cache so decode can read them via IPC.
+            if _has_prefill and actual_cp_size > 1:
+                qsl_cpu = self.query_start_loc.cpu[:num_dycp_reqs + 1]
+                local_tokens_np = (
+                    qsl_cpu[1:num_dycp_reqs + 1] - qsl_cpu[:num_dycp_reqs]
+                )
+                if isinstance(local_tokens_np, torch.Tensor):
+                    local_tokens_np = local_tokens_np.numpy()
+                local_tokens_np = local_tokens_np.astype(np.int64)
+                padded_seq_lens_np = local_tokens_np * actual_cp_size
+                num_pcp_pads_np = (
+                    self.pcp_manager.num_pcp_pads_cpu[:num_dycp_reqs]
+                )
+                if isinstance(num_pcp_pads_np, torch.Tensor):
+                    num_pcp_pads_np = num_pcp_pads_np.numpy()
+                real_seq_lens_np = padded_seq_lens_np - num_pcp_pads_np
+                cumsum_padded = np.cumsum(padded_seq_lens_np)
+                total_padded = int(cumsum_padded[-1])
+
+                block_size = self.cache_config.block_size
+                interleave_size = (
+                    self.parallel_config.cp_kv_cache_interleave_size
+                )
+                blk_table = self.input_batch.block_table[0]
+                num_computed_np = (
+                    self.input_batch.num_computed_tokens_cpu[:num_dycp_reqs]
+                )
+                if isinstance(num_computed_np, torch.Tensor):
+                    num_computed_np = num_computed_np.numpy()
+                per_req_cp = self._per_req_cp_sizes_np
+                if per_req_cp is not None and num_dycp_reqs <= len(per_req_cp):
+                    cp_sizes_np = per_req_cp[:num_dycp_reqs]
+                else:
+                    cp_sizes_np = np.full(
+                        num_dycp_reqs, actual_cp_size, dtype=np.int32
+                    )
+
+                slot_mapping_np = np.full(total_padded, -1, dtype=np.int64)
+                for i in range(num_dycp_reqs):
+                    start = int(cumsum_padded[i - 1]) if i > 0 else 0
+                    end = int(cumsum_padded[i])
+                    cp_i = int(cp_sizes_np[i])
+                    rank_i = self.dycp_rank % cp_i
+                    real_len = int(real_seq_lens_np[i])
+                    comp_off = int(num_computed_np[i])
+
+                    rel_pos = np.arange(end - start, dtype=np.int64)
+                    abs_pos = rel_pos + comp_off
+
+                    vbs = block_size * cp_i
+                    vbo = abs_pos % vbs
+                    mask = (
+                        (vbo // interleave_size) % cp_i == rank_i
+                    ) & (rel_pos < real_len)
+
+                    bt_idx = (
+                        i * blk_table.max_num_blocks_per_req
+                        + abs_pos // vbs
+                    )
+                    bt_flat = blk_table.block_table.np.ravel()
+                    blk_nums = bt_flat[bt_idx]
+                    blk_off = (
+                        vbo // (cp_i * interleave_size) * interleave_size
+                        + vbo % interleave_size
+                    )
+                    slots = blk_nums * block_size + blk_off
+                    slot_mapping_np[start:end] = np.where(mask, slots, -1)
+
+                cm_base.dycp_full_interleave_slot_mapping = (
+                    torch.from_numpy(slot_mapping_np).to(
+                        device=self.device, dtype=torch.int64
+                    )
+                )
 
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
             cm_base.num_logits_indices = logits_indices.size(0)
@@ -3123,7 +3253,8 @@ class GPUModelRunner(
         force_uniform_decode: bool | None = None,
         force_has_lora: bool | None = None,
         num_encoder_reqs: int = 0,
-        num_cp_tokens: int = 0,
+        num_cp_request: int = 0,
+        actual_cp_size: int = 1,
     ) -> tuple[
         CUDAGraphMode,
         BatchDescriptor,
@@ -3135,7 +3266,7 @@ class GPUModelRunner(
         uniform_decode = (
             (
                 (max_num_scheduled_tokens == self.uniform_decode_query_len)
-                and (num_tokens_padded == max_num_scheduled_tokens * num_reqs)
+                and (num_tokens == max_num_scheduled_tokens * num_reqs)
             )
             if force_uniform_decode is None
             else force_uniform_decode
@@ -3158,7 +3289,8 @@ class GPUModelRunner(
                 has_lora=has_lora,
                 uniform_decode=uniform_decode,
                 disable_full=disable_full,
-                num_cp_tokens=num_cp_tokens,
+                num_cp_request=num_cp_request,
+                cp_size=actual_cp_size if num_cp_request > 0 else 1,
             )
             if not force_eager
             else (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
@@ -3184,6 +3316,15 @@ class GPUModelRunner(
                 or self.parallel_config.enable_expert_parallel
             )
 
+            # When DyCP is active and this rank has 0 tokens, report FULL mode
+            # to DP coordination so that non-CP ranks don't downgrade CP ranks'
+            # CUDA graph mode. After DP padding, all ranks have the same token
+            # count and can use FULL mode.
+            cudagraph_mode_for_dp = cudagraph_mode.value
+            if (self.dycp_world_size > 1 and num_tokens == 0
+                    and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE):
+                cudagraph_mode_for_dp = CUDAGraphMode.FULL.value
+
             should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = (
                 coordinate_batch_across_dp(
                     num_tokens_unpadded=num_tokens,
@@ -3193,7 +3334,7 @@ class GPUModelRunner(
                     num_tokens_padded=num_tokens_padded,
                     uniform_decode=uniform_decode,
                     num_scheduled_tokens_per_request=num_scheduled_tokens_np,
-                    cudagraph_mode=cudagraph_mode.value,
+                    cudagraph_mode=cudagraph_mode_for_dp,
                 )
             )
 
@@ -3201,14 +3342,53 @@ class GPUModelRunner(
             if num_tokens_across_dp is not None:
                 dp_rank = self.parallel_config.data_parallel_rank
                 num_tokens_padded = int(num_tokens_across_dp[dp_rank].item())
+                if self.dycp_world_size > 1:
+                    # In DyCP mode, each CP subgroup operates independently.
+                    # Don't let a prefill subgroup downgrade the CUDA graph
+                    # mode of a decode subgroup. Each rank uses its own local
+                    # mode so decode ranks keep FULL (CUDA graph) while
+                    # prefill ranks use NONE (eager) independently.
+                    disable_full = (cudagraph_mode_for_dp
+                                    <= CUDAGraphMode.PIECEWISE.value)
+                    # Round up to the nearest CUDA graph capture size so that
+                    # both eager-mode and CUDA-graph-mode ranks use the same
+                    # token count. Without this, DP coordination may produce a
+                    # non-capture-size (e.g. 6), which CUDA graph dispatch
+                    # rounds up (to 8), causing a mismatch with eager ranks
+                    # that keep the original count.
+                    if num_tokens_padded > 0 and num_tokens_padded <= self.compilation_config.max_cudagraph_capture_size:
+                        num_tokens_padded = self.vllm_config.pad_for_cudagraph(
+                            num_tokens_padded)
+                        # Update num_tokens_across_dp to match the rounded-up
+                        # value so the forward context assertion passes.
+                        num_tokens_across_dp = num_tokens_across_dp.clone()
+                        num_tokens_across_dp.fill_(num_tokens_padded)
+                else:
+                    disable_full = (synced_cudagraph_mode
+                                    <= CUDAGraphMode.PIECEWISE.value)
+                # When DyCP is active and this rank has 0 original tokens but
+                # is DP-padded, set uniform_decode=True so the dispatch finds
+                # the correct CUDA graph key for non-CP decode.
+                if (self.dycp_world_size > 1 and num_tokens == 0
+                        and num_tokens_padded > 0):
+                    uniform_decode = True
                 # Re-dispatch with DP padding so we have the correct batch_descriptor
                 cudagraph_mode, batch_descriptor = dispatch_cudagraph(
                     num_tokens_padded,
-                    disable_full=synced_cudagraph_mode <= CUDAGraphMode.PIECEWISE.value,
+                    disable_full=disable_full,
                 )
-                # Assert to make sure the agreed upon token count is correct otherwise
-                # num_tokens_across_dp will no-longer be valid
-                assert batch_descriptor.num_tokens == num_tokens_padded
+                num_tokens_padded = batch_descriptor.num_tokens
+                if self.dycp_world_size > 1:
+                    logger.debug(
+                        "DyCP dispatch: dp_rank=%d, cudagraph_mode=%s, "
+                        "num_tokens=%d, num_tokens_padded=%d, "
+                        "num_cp_request=%d, actual_cp_size=%d, "
+                        "disable_full=%s, uniform_decode=%s",
+                        self.parallel_config.data_parallel_rank,
+                        cudagraph_mode, num_tokens, num_tokens_padded,
+                        num_cp_request, actual_cp_size,
+                        disable_full, uniform_decode,
+                    )
 
         cudagraph_stats = None
         if self.vllm_config.observability_config.cudagraph_metrics:
@@ -3336,6 +3516,19 @@ class GPUModelRunner(
                 max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
                 num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
 
+                # Compute dycp_has_prefill BEFORE _prepare_inputs, which
+                # may modify num_scheduled_tokens_np via PCP token splitting.
+                # After splitting, each rank may have only 1 token per
+                # prefill request, causing the >1 check to misclassify
+                # prefill as decode.
+                if (self.dycp_world_size > 1
+                        and scheduler_output.num_cp_request > 0):
+                    dycp_has_prefill_pre_split = np.any(
+                        num_scheduled_tokens_np[
+                            :scheduler_output.num_cp_request] > 1
+                    )
+                else:
+                    dycp_has_prefill_pre_split = False
 
                 (
                     logits_indices,
@@ -3389,7 +3582,8 @@ class GPUModelRunner(
                     max_num_scheduled_tokens=max_num_scheduled_tokens,
                     use_cascade_attn=cascade_attn_prefix_lens is not None,
                     num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
-                    num_cp_tokens=scheduler_output.num_cp_request,
+                    num_cp_request=scheduler_output.num_cp_request,
+                    actual_cp_size=scheduler_output.actual_cp_size,
                 )
 
                 logger.debug(
@@ -3417,12 +3611,18 @@ class GPUModelRunner(
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
                 ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
 
-                # Calculate num_dycp_tokens
+                # Calculate num_dycp_tokens and dycp_has_prefill.
+                # Use the pre-split dycp_has_prefill computed before
+                # _prepare_inputs, since PCP splitting may reduce token
+                # counts to 1 per request, causing post-split >1 check
+                # to misclassify prefill as decode.
                 if scheduler_output.num_cp_request > 0:
                     num_dycp_reqs = scheduler_output.num_cp_request
                     num_dycp_tokens = int(num_scheduled_tokens_np[:num_dycp_reqs].sum())
+                    dycp_has_prefill = dycp_has_prefill_pre_split
                 else:
                     num_dycp_tokens = 0
+                    dycp_has_prefill = False
 
                 (attn_metadata, spec_decode_common_attn_metadata) = (
                     self._build_attention_metadata(
@@ -3438,6 +3638,8 @@ class GPUModelRunner(
                         cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                         num_dycp_reqs=scheduler_output.num_cp_request,
                         num_dycp_tokens=num_dycp_tokens,
+                        actual_cp_size=scheduler_output.actual_cp_size,
+                        dycp_has_prefill=dycp_has_prefill,
                     )
                 )
 
@@ -3506,9 +3708,9 @@ class GPUModelRunner(
                 # Only restore hidden states when PCP token splitting was used
                 # (i.e., DyCP prefill). Pure DyCP decode skips PCP processing
                 # entirely, so no allgather/restore is needed.
-                dycp_has_prefill = np.any(
-                    num_scheduled_tokens_np[:scheduler_output.num_cp_request] > 1
-                )
+                # Use pre-split value to avoid misclassifying prefill as
+                # decode after PCP splitting reduces token counts to 1.
+                dycp_has_prefill = dycp_has_prefill_pre_split
                 if dycp_has_prefill:
                     num_cp_request = scheduler_output.num_cp_request
                     num_dycp_tokens_unpadded = int(num_scheduled_tokens_np[:num_cp_request].sum())
@@ -3516,8 +3718,16 @@ class GPUModelRunner(
                     dycp_hidden_states = hidden_states[:num_dycp_tokens_unpadded]
                     non_dycp_hidden_states = hidden_states[num_dycp_tokens_unpadded:]
 
+                    logger.debug(
+                        "DYCP_NCCL: post-forward restore_hidden_states "
+                        "rank=%d cp_request=%d actual_cp_size=%d "
+                        "dycp_tokens=%d",
+                        self.dycp_rank, num_cp_request,
+                        scheduler_output.actual_cp_size,
+                        num_dycp_tokens_unpadded)
                     dycp_hidden_states = self.pcp_manager.get_dycp_restore_hidden_states(
                         dycp_hidden_states, num_dycp_tokens_unpadded,
+                        actual_cp_size=scheduler_output.actual_cp_size,
                     )
 
                     hidden_states = torch.cat([dycp_hidden_states, non_dycp_hidden_states], dim=0)
@@ -4402,7 +4612,8 @@ class GPUModelRunner(
         remove_lora: bool = True,
         activate_lora: bool = False,
         is_graph_capturing: bool = False,
-        num_cp_tokens: int = 0,
+        num_cp_request: int = 0,
+        actual_cp_size: int = 1,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -4502,7 +4713,8 @@ class GPUModelRunner(
                 # activated later in the context manager, but we need to know the
                 # LoRA state when determining the batch descriptor for capture
                 force_has_lora=activate_lora,
-                num_cp_tokens=num_cp_tokens,
+                num_cp_request=num_cp_request,
+                actual_cp_size=actual_cp_size,
             )
         )
 
@@ -4549,8 +4761,9 @@ class GPUModelRunner(
                 max_query_len=max_query_len,
                 ubatch_slices=ubatch_slices_padded if pad_attn else ubatch_slices,
                 for_cudagraph_capture=is_graph_capturing,
-                num_dycp_reqs=num_cp_tokens,
+                num_dycp_reqs=num_cp_request,
                 num_dycp_tokens=0,  # CUDA graph capture uses dummy values
+                actual_cp_size=actual_cp_size,
             )
 
         with self.maybe_dummy_run_with_lora(
@@ -4848,7 +5061,7 @@ class GPUModelRunner(
         return self._dummy_pooler_run_task(hidden_states, max_task)
 
     def get_dycp_allgather_reserve_bytes(self) -> int:
-        """DyCP allgather 临时 KV tensor 所需额外显存（单层峰值）。
+        """Reserve bytes for DyCP allgather temporary KV tensors (per-layer peak).
 
         pcp_kv_allgather_and_restore creates temporary tensors at
         pre-division size. Profile run only covers max_num_tokens worth
@@ -4989,11 +5202,30 @@ class GPUModelRunner(
                 lora_cases = [False]
 
             cp_tokens_list = [i for i in range(self.compilation_config.cudagraph_capture_sizes_for_cp + 1)]
+            dycp_cp_sizes = list(
+                self.parallel_config.dycp_all_cp_sizes
+            ) if self.parallel_config.dycp_enabled else [1]
+
+            def _build_cp_cases(batch_sizes, lora_cases):
+                """Build (bs, lora, cp_tokens, cp_size) with DyCP pruning."""
+                cases = []
+                for bs, lora in product(reversed(batch_sizes), lora_cases):
+                    # cp_tokens=0 → cp_size=1
+                    cases.append((bs, lora, 0, 1))
+                    # cp_tokens>0 → cp_size>1
+                    for cp_t in cp_tokens_list:
+                        if cp_t == 0:
+                            continue
+                        for cs in dycp_cp_sizes:
+                            if cs <= 1:
+                                continue
+                            cases.append((bs, lora, cp_t, cs))
+                return cases
             if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
                 cudagraph_runtime_mode = cudagraph_mode.mixed_mode()
                 # make sure we capture the largest batch size first
-                compilation_cases = list(
-                    product(reversed(self.cudagraph_batch_sizes), lora_cases, cp_tokens_list)
+                compilation_cases = _build_cp_cases(
+                    self.cudagraph_batch_sizes, lora_cases
                 )
                 self._capture_cudagraphs(
                     compilation_cases,
@@ -5016,8 +5248,8 @@ class GPUModelRunner(
                     if max_num_tokens >= x >= self.uniform_decode_query_len
                 ]
 
-                compilation_cases_decode = list(
-                    product(reversed(decode_cudagraph_batch_sizes), lora_cases, cp_tokens_list)
+                compilation_cases_decode = _build_cp_cases(
+                    decode_cudagraph_batch_sizes, lora_cases
                 )
                 self._capture_cudagraphs(
                     compilation_cases=compilation_cases_decode,
@@ -5053,7 +5285,7 @@ class GPUModelRunner(
 
     def _capture_cudagraphs(
         self,
-        compilation_cases: list[tuple[int, bool, int]],
+        compilation_cases: list[tuple[int, bool, int, int]],
         cudagraph_runtime_mode: CUDAGraphMode,
         uniform_decode: bool,
     ):
@@ -5074,7 +5306,7 @@ class GPUModelRunner(
             )
 
         # We skip EPLB here since we don't want to record dummy metrics
-        for num_tokens, activate_lora, num_cp_tokens in compilation_cases:
+        for num_tokens, activate_lora, num_cp_request, cp_size in compilation_cases:
             # We currently only capture ubatched graphs when its a FULL
             # cudagraph, a uniform decode batch, and the number of tokens
             # is above the threshold. Otherwise we just capture a non-ubatched
@@ -5106,7 +5338,8 @@ class GPUModelRunner(
                     skip_eplb=True,
                     remove_lora=False,
                     activate_lora=activate_lora,
-                    num_cp_tokens=num_cp_tokens,
+                    num_cp_request=num_cp_request,
+                    actual_cp_size=cp_size,
                 )
             self._dummy_run(
                 num_tokens,
@@ -5117,7 +5350,8 @@ class GPUModelRunner(
                 remove_lora=False,
                 activate_lora=activate_lora,
                 is_graph_capturing=True,
-                num_cp_tokens=num_cp_tokens,
+                num_cp_request=num_cp_request,
+                actual_cp_size=cp_size,
             )
         self.maybe_remove_all_loras(self.lora_config)
 

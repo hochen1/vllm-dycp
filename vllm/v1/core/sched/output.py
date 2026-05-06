@@ -211,8 +211,12 @@ class SchedulerOutput:
     ec_connector_metadata: ECConnectorMetadata | None = None
 
     cp_rank: int = 0
-    
+
     num_cp_request: int = 0
+
+    actual_cp_size: int = 1
+
+    per_req_cp_sizes: dict[str, int] | None = None
 
     none_tokens_in_peer_sched: bool = False
 

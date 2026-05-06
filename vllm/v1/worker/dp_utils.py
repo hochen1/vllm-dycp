@@ -93,10 +93,15 @@ def _post_process_dp_padding(tensor: torch.Tensor, should_dp_pad: bool) -> torch
 
 def _post_process_cudagraph_mode(tensor: torch.Tensor) -> int:
     """
-    Synchronize cudagraph_mode across DP ranks by taking the minimum.
-    If any rank has NONE (0), all ranks use NONE.
-    This ensures all ranks send consistent values (all padded or all unpadded).
+    Synchronize cudagraph_mode across DP ranks by taking the minimum
+    among ranks that have tokens. Ranks with 0 tokens are ignored because
+    they have no work and their dispatch result (NONE) should not
+    downgrade ranks that have actual tokens. After DP padding, ranks
+    with 0 original tokens will be padded and can use the agreed-upon mode.
     """
+    nonzero_mask = tensor[0, :] > 0
+    if nonzero_mask.any():
+        return int(tensor[4, nonzero_mask].min().item())
     return int(tensor[4, :].min().item())
 
 

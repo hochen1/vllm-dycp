@@ -95,16 +95,23 @@ def _correct_attn_cp_out_kernel(
 
 
 class CPTritonContext:
-    """The CPTritonContext is used to avoid recompilation of the Triton JIT."""
+    """The CPTritonContext is used to avoid recompilation of the Triton JIT.
+
+    Under DyCP, different cp_sizes produce different N_ROUNDED (a Triton
+    constexpr), requiring separate compiled kernels.  This class indexes
+    compiled kernels by a hashable key derived from const_args so that
+    switching between cp_sizes does not trigger recompilation.
+    """
 
     def __init__(self):
-        self.inner_kernel = None
+        self._kernels: dict[tuple, object] = {}
 
     def call_kernel(self, kernel, grid, *regular_args, **const_args):
-        if self.inner_kernel is None:
-            self.inner_kernel = kernel[grid](*regular_args, **const_args)
+        key = tuple(sorted(const_args.items()))
+        if key not in self._kernels:
+            self._kernels[key] = kernel[grid](*regular_args, **const_args)
         else:
-            self.inner_kernel[grid](*regular_args)
+            self._kernels[key][grid](*regular_args)
 
 
 def correct_attn_out(
@@ -264,23 +271,53 @@ def dycp_lse_out_ar(
     cp_attn_lse: torch.Tensor,
     cp_group: GroupCoordinator,
     num_dycp_reqs: int,
-):  
-    if cp_attn_lse is None:
+):
+    """Fused all-reduce for DyCP decode: combines LSE-weighted output and
+    LSE sum into a single all-reduce, halving NCCL ops per layer vs
+    cp_lse_ag_out_ar (which uses all_gather + all_reduce).
+
+    cp_attn_out: [B, H, D]
+    cp_attn_lse: [B, H] or [B, H, S] (S=1 for decode)
+
+    global_output = sum_i(attn_out_i * exp(lse_i)) / sum_i(exp(lse_i))
+    """
+    if cp_attn_lse is None or cp_group.world_size == 1:
         return cp_attn_out
-    lse_exp = torch.exp(cp_attn_lse)[:num_dycp_reqs]
-    lse_exp = lse_exp.unsqueeze(-1)
-    weighted_output = cp_attn_out[:num_dycp_reqs] * lse_exp
+    import logging
+    logger = logging.getLogger("vllm.attention.ops.common")
+    logger.debug(
+        "DYCP_NCCL: dycp_lse_out_ar all_reduce group_ws=%d "
+        "num_dycp_reqs=%d lse_shape=%s",
+        cp_group.world_size, num_dycp_reqs,
+        list(cp_attn_lse.shape))
+    # FlashMLA returns lse as [B, H, S]; squeeze to [B, H] for decode (S=1)
+    if cp_attn_lse.ndim == 3 and cp_attn_lse.shape[-1] == 1:
+        cp_attn_lse = cp_attn_lse.squeeze(-1)
+    lse_slice = cp_attn_lse[:num_dycp_reqs]
+    # Replace NaN and +inf with -inf so exp() yields 0 (no contribution)
+    # instead of propagating invalid values through the all-reduce.
+    lse_slice = torch.where(
+        torch.isnan(lse_slice) | torch.isinf(lse_slice),
+        torch.full_like(lse_slice, float('-inf')),
+        lse_slice,
+    )
+    lse_exp = torch.exp(lse_slice)
+    lse_exp_unsqueezed = lse_exp.unsqueeze(-1)
+    weighted_output = cp_attn_out[:num_dycp_reqs] * lse_exp_unsqueezed
     target_shape = weighted_output.view(lse_exp.shape[0], -1).shape
     packed_out = torch.cat([
-                weighted_output.view(lse_exp.shape[0], -1),  # [bs, num_heads * v_head_dim]
-                lse_exp.view(lse_exp.shape[0], -1)           # [bs, num_heads]
-            ], dim=-1)
+        weighted_output.view(lse_exp.shape[0], -1),
+        lse_exp.view(lse_exp.shape[0], -1),
+    ], dim=-1)
     cp_group.all_reduce(packed_out)
-    global_weighted = packed_out[:, :target_shape[1]]
-    global_lse_sum = packed_out[:, target_shape[1]:]
-    global_weighted = global_weighted.view(weighted_output.shape)
-    global_lse_sum = global_lse_sum.view(lse_exp.shape)
-    global_output = weighted_output / lse_exp
+    global_weighted = packed_out[:, :target_shape[1]].view(weighted_output.shape)
+    global_lse_sum = packed_out[:, target_shape[1]:].view(lse_exp_unsqueezed.shape)
+    # Guard against division by zero when all LSE values are -inf
+    global_output = torch.where(
+        global_lse_sum > 0,
+        global_weighted / global_lse_sum,
+        torch.zeros_like(global_weighted),
+    )
     cp_attn_out[:num_dycp_reqs].copy_(global_output)
 
     return cp_attn_out

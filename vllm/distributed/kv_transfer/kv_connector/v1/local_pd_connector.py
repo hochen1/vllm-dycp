@@ -6,22 +6,27 @@ In local PD separation mode:
 - Decode phase: the single decode rank loads KV and injects into paged cache
 
 Two KV transfer modes:
-1. CUDA IPC (default for multi-CP): direct GPU-to-GPU memcpy via IPC handles
-2. GPU buffer (fallback for single-CP): all-gather + in-memory buffer
+1. CUDA IPC (default): direct GPU-to-GPU memcpy via IPC handles
+2. GPU buffer (fallback when IPC not initialized): in-memory buffer
+
+IPC mode uses block-level copies from prefill ranks' paged buffers to
+the decode rank's paged buffer, respecting the interleave layout. The
+prefill_cp_ranks metadata ensures correct source rank mapping regardless
+of which DP rank the decode request is scheduled on.
 
 KNOWN LIMITATION (v1):
-  KV reconstruction uses simple concatenation (torch.cat) which assumes
-  ranks hold contiguous token ranges. With DualChunkSwap, tokens are
-  interleaved across ranks in a head/tail pattern, so concatenation may
-  produce incorrectly ordered KV. This needs to be addressed by saving
-  the PCPManager's restore index (pcp_allgather_restore_idx) and applying
-  it during load. For initial testing, validate KV correctness by comparing
-  outputs with and without PD separation.
+  The legacy GPU buffer path (_start_load_kv_legacy) uses simple
+  concatenation (torch.cat) which assumes ranks hold contiguous token
+  ranges. With DualChunkSwap, tokens are interleaved across ranks in a
+  head/tail pattern, so concatenation may produce incorrectly ordered KV.
+  The IPC path is not affected because it uses block-level copies that
+  respect the interleave layout.
 """
 
 import ctypes
 import os
 import re
+import time as _time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -39,6 +44,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (
     align_to_block_size,
 )
 from vllm.logger import init_logger
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.common import MLACommonMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -250,6 +256,12 @@ class LocalPDConnector(KVConnectorBase_V1):
             self._completed_prefills: dict[str, dict[str, Any]] = {}
             # IPC: {prefix: prefill_request_id} for delayed block freeing
             self._ipc_delayed_prefill_ids: dict[str, str] = {}
+            # Orphan cleanup: max seconds a completed prefill entry
+            # lives without a matching decode request.
+            self._orphan_timeout_s: float = 300.0
+            # Prefill req_ids whose blocks must be freed because their
+            # decode partner never arrived (orphan cleanup).
+            self._orphaned_prefill_ids_to_free: set[str] = set()
 
         if role == KVConnectorRole.WORKER:
             self._gpu_kv_buffer: dict[str, dict[str, torch.Tensor]] = {}
@@ -263,6 +275,7 @@ class LocalPDConnector(KVConnectorBase_V1):
             self._ipc_stream = None  # dedicated CUDA stream for async IPC
             # {decode_req_id: (cuda_event, prefill_req_id)} async IPC tracking
             self._ipc_pending_events: dict[str, tuple] = {}
+            self._ipc_gpu_synced: bool = False
 
         logger.info(
             "LocalPDConnector initialized: storage_path=%s, "
@@ -291,7 +304,6 @@ class LocalPDConnector(KVConnectorBase_V1):
             logger.info("IPC disabled via VLLM_DYCP_USE_IPC=0")
             return
 
-        import time as _time
         t0 = _time.monotonic()
 
         from vllm.distributed.device_communicators.cuda_wrapper import (
@@ -326,25 +338,32 @@ class LocalPDConnector(KVConnectorBase_V1):
             layer_handles[layer_name] = all_handles  # type: ignore[assignment]
 
         # Open remote handles and store raw pointers + metadata
-        for layer_name, kv_tensor in kv_caches.items():
-            elem_size = kv_tensor.element_size()
-            for src_rank in range(world_size):
-                if src_rank == my_rank:
-                    continue
+        try:
+            for layer_name, kv_tensor in kv_caches.items():
+                elem_size = kv_tensor.element_size()
+                for src_rank in range(world_size):
+                    if src_rank == my_rank:
+                        continue
 
-                handle_bytes = layer_handles[layer_name][src_rank]
-                handle = cudaIpcMemHandle_t()
-                ctypes.memmove(
-                    ctypes.byref(handle), handle_bytes, 128
-                )
-                remote_ptr = self._cuda_lib.cudaIpcOpenMemHandle(handle)
+                    handle_bytes = layer_handles[layer_name][src_rank]
+                    handle = cudaIpcMemHandle_t()
+                    ctypes.memmove(
+                        ctypes.byref(handle), handle_bytes, 128
+                    )
+                    remote_ptr = self._cuda_lib.cudaIpcOpenMemHandle(handle)
 
-                # Store raw pointer + metadata for cudaMemcpy at load time
-                self._remote_ipc_info.setdefault(
-                    src_rank, {}
-                )[layer_name] = (
-                    remote_ptr, kv_tensor.shape, kv_tensor.dtype, elem_size,
-                )
+                    # Store raw pointer + metadata for cudaMemcpy at load time
+                    self._remote_ipc_info.setdefault(
+                        src_rank, {}
+                    )[layer_name] = (
+                        remote_ptr, kv_tensor.shape, kv_tensor.dtype,
+                        elem_size,
+                    )
+        except Exception:
+            # Close already-opened handles to prevent GPU virtual address
+            # space leak if cudaIpcOpenMemHandle fails partway through.
+            self._close_ipc_handles()
+            raise
 
         # Create dedicated CUDA stream + event for async IPC transfers
         stream_ptr = ctypes.c_void_p()
@@ -354,14 +373,6 @@ class LocalPDConnector(KVConnectorBase_V1):
             )
         )
         self._ipc_stream = stream_ptr
-
-        event_ptr = ctypes.c_void_p()
-        self._cuda_lib.CUDART_CHECK(
-            self._cuda_lib.funcs["cudaEventCreate"](
-                ctypes.byref(event_ptr)
-            )
-        )
-        self._ipc_event = event_ptr
 
         self._ipc_initialized = True
         elapsed = (_time.monotonic() - t0) * 1000
@@ -381,7 +392,7 @@ class LocalPDConnector(KVConnectorBase_V1):
         num_computed_tokens: int,
     ) -> tuple[int | None, bool]:
         kv_params = request.kv_transfer_params
-        logger.info(
+        logger.debug(
             "get_num_new_matched_tokens called: req=%s, "
             "num_computed=%d, kv_params=%s",
             request.request_id,
@@ -415,6 +426,7 @@ class LocalPDConnector(KVConnectorBase_V1):
                         "interleave_size": kv_params.get("interleave_size", self._interleave_size),
                         "block_size": self._block_size,
                         "pd_request_prefix": prefix,
+                        "prefill_cp_ranks": kv_params.get("prefill_cp_ranks"),
                     }
                     self._completed_prefills[prefix] = meta
                     logger.info(
@@ -448,10 +460,9 @@ class LocalPDConnector(KVConnectorBase_V1):
             if ext_tokens <= 0:
                 return 0, False
 
-            import time as _time
             _now = _time.monotonic() * 1000
             _gap = _now - meta.get("_finish_time_ms", _now)
-            logger.info(
+            logger.debug(
                 "External KV found for prefix=%s: %d tokens "
                 "(aligned=%d, gap_from_prefill=%.1fms)",
                 prefix, num_prompt_tokens, aligned, _gap,
@@ -464,14 +475,15 @@ class LocalPDConnector(KVConnectorBase_V1):
 
         if kv_params.get("do_remote_decode"):
             # Prefill request: track for KV saving, execute normally
+            kv_params["_start_time_ms"] = _time.monotonic() * 1000
             self._prefill_requests[request.request_id] = kv_params
-            logger.info(
+            logger.debug(
                 "Tracked prefill req=%s, _prefill_requests now has %d entries",
                 request.request_id, len(self._prefill_requests),
             )
             return 0, False
 
-        logger.info(
+        logger.debug(
             "Request %s has kv_transfer_params but no PD flags: %s",
             request.request_id, kv_params,
         )
@@ -483,11 +495,25 @@ class LocalPDConnector(KVConnectorBase_V1):
         blocks: "KVCacheBlocks",
         num_external_tokens: int,
     ):
+        logger.debug(
+            "update_state_after_alloc: req=%s, num_ext=%d, "
+            "cp_ranks=%s, kv_params=%s",
+            request.request_id, num_external_tokens,
+            request.cp_ranks,
+            {k: v for k, v in (request.kv_transfer_params or {}).items()
+             if k != 'prompt_token_ids'},
+        )
         if num_external_tokens > 0:
             for cp_rank in request.cp_ranks:
                 self._cross_requests_need_load[cp_rank][
                     request.request_id
                 ] = request
+            logger.debug(
+                "Registered load for req=%s on cp_ranks=%s, "
+                "total loads per rank: %s",
+                request.request_id, request.cp_ranks,
+                {r: len(v) for r, v in enumerate(self._cross_requests_need_load)},
+            )
 
     def build_connector_meta(
         self,
@@ -498,12 +524,13 @@ class LocalPDConnector(KVConnectorBase_V1):
         cp_rank = scheduler_output.cp_rank
 
         if cp_rank == 0:
-            logger.info(
-                "build_connector_meta START: _prefill_requests=%s, "
-                "new_reqs=%d, num_sched=%s",
-                list(self._prefill_requests.keys())[:3],
+            need_load_keys = list(self._cross_requests_need_load[cp_rank].keys())
+            logger.debug(
+                "build_connector_meta: prefill=%d, need_load=%d, "
+                "new_reqs=%d",
+                len(self._prefill_requests),
+                len(need_load_keys),
                 len(scheduler_output.scheduled_new_reqs),
-                list(scheduler_output.num_scheduled_tokens.keys())[:3],
             )
 
         for new_req in scheduler_output.scheduled_new_reqs:
@@ -519,10 +546,19 @@ class LocalPDConnector(KVConnectorBase_V1):
                     if request.kv_transfer_params
                     else ""
                 )
+                # Diagnostic: log decode request block allocation
+                decode_block_ids = new_req.block_ids[0]
+                num_computed = new_req.num_computed_tokens
+                logger.debug(
+                    "PD decode req=%s: num_computed=%d, blocks=%d, "
+                    "cp_rank=%d",
+                    new_req.req_id, num_computed,
+                    len(decode_block_ids), cp_rank,
+                )
                 meta.add_request(
                     req_id=new_req.req_id,
                     token_ids=token_ids,
-                    block_ids=new_req.block_ids[0],
+                    block_ids=decode_block_ids,
                     block_size=self._block_size,
                     is_store=False,
                     pd_request_prefix=pd_prefix,
@@ -665,22 +701,70 @@ class LocalPDConnector(KVConnectorBase_V1):
 
         store_count = sum(1 for r in meta.requests if r.is_store)
         load_count = sum(1 for r in meta.requests if not r.is_store)
-        logger.info(
+        logger.debug(
             "build_connector_meta cp_rank=%d: %d store, %d load requests",
             cp_rank, store_count, load_count,
         )
 
-        expected = len(self._cross_requests_need_load[cp_rank])
-        if total_need_load != expected:
-            logger.warning(
-                "LocalPDConnector: need_load mismatch on cp_rank=%d: "
-                "total_need_load=%d, expected=%d. "
-                "Some requests may not have been scheduled this step.",
-                cp_rank,
-                total_need_load,
-                expected,
+        # Cleanup orphaned _completed_prefills entries whose decode
+        # partner never arrived. Safe to remove because decode requests
+        # carry their own metadata via kv_transfer_params fallback.
+        if cp_rank == 0 and (self._completed_prefills or self._prefill_requests):
+            now_ms = _time.monotonic() * 1000
+            orphaned = [
+                k for k, v in self._completed_prefills.items()
+                if now_ms - v.get("_finish_time_ms", now_ms)
+                > self._orphan_timeout_s * 1000
+            ]
+            for k in orphaned:
+                logger.warning(
+                    "Cleaning orphaned prefill entry prefix=%s "
+                    "(no decode request after %.0fs), freeing blocks",
+                    k, self._orphan_timeout_s,
+                )
+                orphan_meta = self._completed_prefills.pop(k, None)
+                prefill_req_id = self._ipc_delayed_prefill_ids.pop(k, None)
+                # Schedule the prefill request's blocks for freeing.
+                # The scheduler will pick this up via get_finished() and
+                # call _free_blocks() to release the KV cache blocks.
+                if prefill_req_id:
+                    self._orphaned_prefill_ids_to_free.add(prefill_req_id)
+                elif orphan_meta and orphan_meta.get("prefill_req_id"):
+                    self._orphaned_prefill_ids_to_free.add(
+                        orphan_meta["prefill_req_id"])
+
+        # Cleanup stale _prefill_requests entries (prefill cancelled before
+        # finishing). These entries should be short-lived; any entry older
+        # than the orphan timeout is leaked.
+        if cp_rank == 0 and self._prefill_requests:
+            stale_prefills = [
+                rid for rid, kv in self._prefill_requests.items()
+                if now_ms - kv.get("_start_time_ms", now_ms)
+                > self._orphan_timeout_s * 1000
+            ]
+            for rid in stale_prefills:
+                logger.warning(
+                    "Cleaning stale _prefill_requests entry req=%s "
+                    "(no completion after %.0fs)",
+                    rid, self._orphan_timeout_s,
+                )
+                self._prefill_requests.pop(rid, None)
+
+        # Only remove requests that were actually processed this step.
+        # Unconditionally clearing loses registrations for requests that
+        # haven't been scheduled yet (e.g., decode requests waiting for
+        # a scheduling slot after their prefill completed).
+        processed_req_ids = {r.req_id for r in meta.requests if not r.is_store}
+        for req_id in processed_req_ids:
+            self._cross_requests_need_load[cp_rank].pop(req_id, None)
+        remaining = len(self._cross_requests_need_load[cp_rank])
+        if remaining > 0:
+            logger.debug(
+                "build_connector_meta cp_rank=%d: %d load requests remain "
+                "for next step: %s",
+                cp_rank, remaining,
+                list(self._cross_requests_need_load[cp_rank].keys())[:5],
             )
-        self._cross_requests_need_load[cp_rank].clear()
         return meta
 
     def request_finished(
@@ -727,16 +811,18 @@ class LocalPDConnector(KVConnectorBase_V1):
                 "per_rank_block_ids": per_rank_block_ids,
                 "interleave_size": self._interleave_size,
                 "prefill_req_id": request.request_id,
+                "prefill_cp_ranks": list(request.cp_ranks)
+                if request.cp_ranks else None,
             }
 
-            # Store in memory (no file I/O)
-            import time as _time
-            self._completed_prefills[prefix] = meta
+            # Set timestamp before inserting to prevent race with
+            # get_num_new_matched_tokens reading a stale entry.
             meta["_finish_time_ms"] = _time.monotonic() * 1000
+            self._completed_prefills[prefix] = meta
             # Clean up prefill tracking (all chunks done)
             self._prefill_requests.pop(request.request_id, None)
 
-            logger.info(
+            logger.debug(
                 "Prefill finished for prefix=%s "
                 "(num_prompt_tokens=%d, cp_world_size=%d, "
                 "per_rank_blocks=%s)",
@@ -753,25 +839,50 @@ class LocalPDConnector(KVConnectorBase_V1):
                 "prompt_token_ids": list(request.prompt_token_ids),
                 "per_rank_block_ids": per_rank_block_ids,
                 "interleave_size": self._interleave_size,
+                "prefill_cp_ranks": list(request.cp_ranks)
+                if request.cp_ranks else None,
             }
-            # IPC mode: delay freeing prefill blocks until decode reads them.
+            # Always delay freeing prefill blocks until decode reads them.
             # The worker's get_finished() returns finished_sending
             # after start_load_kv completes IPC copy.
-            delay_free = actual_cp_count > 1
+            # In DMP architecture, prefill and decode may run on
+            # different workers, so _gpu_kv_buffer (per-worker) is
+            # unreliable. Instead, KV stays in paged buffers and
+            # decode reads via IPC — blocks must not be freed until
+            # the IPC copy completes.
+            delay_free = True
             if delay_free:
                 self._ipc_delayed_prefill_ids[prefix] = request.request_id
                 return_params["prefill_req_id"] = request.request_id
-                logger.info(
+                logger.debug(
                     "Delaying block free for prefix=%s req=%s",
                     prefix, request.request_id,
                 )
             return delay_free, return_params
 
         if kv_params.get("do_remote_prefill"):
-            # Decode finished: clean up in-memory metadata
+            # Decode finished: clean up in-memory metadata.
+            # Also clean up the delayed prefill tracking entry since
+            # the IPC copy is guaranteed complete at this point.
             prefix = kv_params.get("pd_request_prefix", "")
             self._completed_prefills.pop(prefix, None)
             self._prefill_requests.pop(request.request_id, None)
+            self._ipc_delayed_prefill_ids.pop(prefix, None)
+            # Clean up any stale load registration. If the request was
+            # cancelled or preempted after update_state_after_alloc but
+            # before build_connector_meta processed it, the entry would
+            # otherwise leak indefinitely.  Preemption clears cp_ranks,
+            # so we also scan all ranks as a fallback.
+            cleaned_ranks = set(request.cp_ranks)
+            for cp_rank in request.cp_ranks:
+                self._cross_requests_need_load[cp_rank].pop(
+                    request.request_id, None)
+            # Fallback: if cp_ranks was cleared by preemption, scan
+            # all ranks to remove stale entries.
+            if not cleaned_ranks:
+                for rank in range(len(self._cross_requests_need_load)):
+                    self._cross_requests_need_load[rank].pop(
+                        request.request_id, None)
             return False, None
 
         return False, None
@@ -785,6 +896,14 @@ class LocalPDConnector(KVConnectorBase_V1):
     ) -> None:
         """Load KV cache for decode requests."""
         metadata = self._get_connector_metadata()
+        logger.debug(
+            "WORKER start_load_kv called: metadata type=%s, "
+            "num_requests=%d, ipc_initialized=%s, cp_world_size=%d",
+            type(metadata).__name__,
+            len(metadata.requests) if isinstance(metadata, LocalPDConnectorMetadata) else -1,
+            self._ipc_initialized,
+            self._cp_world_size,
+        )
         if not isinstance(metadata, LocalPDConnectorMetadata):
             return
 
@@ -794,7 +913,19 @@ class LocalPDConnector(KVConnectorBase_V1):
 
             prefix = req_meta.pd_request_prefix
 
-            if self._ipc_initialized:
+            # Determine CP size for this request from IPC metadata.
+            # Use the IPC path when IPC is initialized, regardless of
+            # cp_world_size. Since delay_free is now always True for
+            # prefill requests and save_kv_layer is a no-op in IPC
+            # mode, the legacy _gpu_kv_buffer path is never populated.
+            # The IPC path reads directly from prefill ranks' paged
+            # buffers via block-level cudaMemcpy.
+            cp_world_size = 1
+            ipc_meta = metadata.ipc_prefill_metas.get(prefix)
+            if ipc_meta:
+                cp_world_size = ipc_meta.get("cp_world_size", 1)
+
+            if self._ipc_initialized and ipc_meta is not None:
                 self._start_load_kv_ipc(
                     req_meta, forward_context, prefix
                 )
@@ -810,7 +941,6 @@ class LocalPDConnector(KVConnectorBase_V1):
         prefix: str,
     ) -> None:
         """Load KV via CUDA IPC from remote ranks' paged buffers."""
-        import time as _time
         t0 = _time.monotonic()
 
         # Get IPC metadata from connector metadata (passed from scheduler)
@@ -828,16 +958,72 @@ class LocalPDConnector(KVConnectorBase_V1):
         if not per_rank_block_ids:
             logger.error("No per_rank_block_ids for prefix=%s", prefix)
             return
-
         cp_world_size = meta.get("cp_world_size", self._cp_world_size)
+        if len(per_rank_block_ids) < cp_world_size:
+            logger.error(
+                "per_rank_block_ids length %d < cp_world_size %d "
+                "for prefix=%s",
+                len(per_rank_block_ids), cp_world_size, prefix,
+            )
+            return
         block_size = self._block_size
         interleave_size = meta.get("interleave_size", self._interleave_size)
 
         from vllm.distributed.parallel_state import get_dycp_group
-        my_rank = get_dycp_group().rank_in_group
+        my_global_rank = get_dycp_group().rank_in_group
+
+        # Use the actual prefill CP ranks from metadata to determine
+        # the source subgroup. This is critical because the decode rank
+        # may not be in the same CP subgroup as the prefill ranks.
+        prefill_cp_ranks = meta.get("prefill_cp_ranks")
+        if prefill_cp_ranks and len(prefill_cp_ranks) == cp_world_size:
+            # Use actual prefill ranks: per_rank_block_ids[i] corresponds
+            # to prefill_cp_ranks[i]
+            prefill_rank_map = prefill_cp_ranks
+        else:
+            # Fallback: assume decode rank is in the same subgroup
+            # (may be incorrect if prefill and decode are on different subgroups)
+            logger.warning(
+                "IPC KV load: prefill_cp_ranks missing or mismatched "
+                "(got %s, cp_world_size=%d), falling back to subgroup "
+                "inference from decode rank %d",
+                prefill_cp_ranks, cp_world_size, my_global_rank,
+            )
+            subgroup_start = (my_global_rank // cp_world_size) * cp_world_size
+            prefill_rank_map = [
+                subgroup_start + i for i in range(cp_world_size)
+            ]
 
         dst_slot_mapping = req_meta.slot_mapping
         actual_tokens = dst_slot_mapping.shape[0]
+
+        # Diagnostic: validate IPC load parameters for CP>1
+        num_prompt_tokens = meta.get("num_prompt_tokens", 0)
+        expected_blocks_per_rank = (
+            cdiv(num_prompt_tokens, block_size * cp_world_size)
+            if cp_world_size > 1 else cdiv(num_prompt_tokens, block_size)
+        )
+        for sr, bids in enumerate(per_rank_block_ids):
+            if len(bids) < expected_blocks_per_rank:
+                logger.warning(
+                    "IPC KV load: rank %d has %d blocks but expected %d "
+                    "(prefix=%s, cp_world_size=%d, num_prompt_tokens=%d)",
+                    sr, len(bids), expected_blocks_per_rank,
+                    prefix, cp_world_size, num_prompt_tokens,
+                )
+        expected_dst_blocks = cdiv(actual_tokens, block_size)
+        dst_blocks_used = len(set(dst_slot_mapping.numpy() // block_size))
+        logger.debug(
+            "IPC KV load params: prefix=%s, cp_world_size=%d, "
+            "actual_tokens=%d, num_prompt_tokens=%d, "
+            "dst_blocks_used=%d, expected_dst_blocks=%d, "
+            "per_rank_blocks=%s, prefill_cp_ranks=%s, "
+            "my_global_rank=%d",
+            prefix, cp_world_size, actual_tokens, num_prompt_tokens,
+            dst_blocks_used, expected_dst_blocks,
+            [len(bids) for bids in per_rank_block_ids],
+            prefill_cp_ranks, my_global_rank,
+        )
 
         # Compute interleave mapping: which src_rank owns each position
         # and what slot in that rank's paged buffer holds the KV.
@@ -872,10 +1058,23 @@ class LocalPDConnector(KVConnectorBase_V1):
             src_block_ids_arr = np.array(per_rank_block_ids[src_rank])
 
             rank_block_indices = block_indices[rank_positions]
-            rank_block_indices = np.clip(
-                rank_block_indices, 0,
-                max(len(src_block_ids_arr) - 1, 0),
-            )
+            if len(src_block_ids_arr) == 0:
+                logger.error(
+                    "IPC load: src_rank=%d has 0 blocks for prefix=%s, "
+                    "skipping (data may be incomplete)",
+                    src_rank, prefix,
+                )
+                continue
+            if np.any(rank_block_indices >= len(src_block_ids_arr)):
+                # Out-of-bounds block indices indicate a bug in block
+                # allocation or IPC metadata — silent clamp would produce
+                # wrong KV data.  Fail loudly so the root cause is fixed.
+                raise AssertionError(
+                    f"IPC load: block index out of range for src_rank="
+                    f"{src_rank} prefix={prefix}: max_idx="
+                    f"{int(rank_block_indices.max())}, num_blocks="
+                    f"{len(src_block_ids_arr)}"
+                )
             src_block_ids_actual = src_block_ids_arr[rank_block_indices]
             dst_slots = dst_slot_mapping[rank_positions].numpy()
             dst_block_ids_actual = dst_slots // block_size
@@ -918,11 +1117,14 @@ class LocalPDConnector(KVConnectorBase_V1):
             local_base_ptr = kv_cache_layer.data_ptr()
 
             for src_rank, block_pairs in per_rank_copies.items():
-                if src_rank == my_rank:
+                # src_rank is CP-relative (0..cp_world_size-1).
+                # Map to global rank using prefill_cp_ranks.
+                src_global_rank = prefill_rank_map[src_rank]
+                if src_global_rank == my_global_rank:
                     # Local rank: copy within same paged buffer
                     src_base_ptr = local_base_ptr
                 else:
-                    ipc_info = self._remote_ipc_info[src_rank][layer_name]
+                    ipc_info = self._remote_ipc_info[src_global_rank][layer_name]
                     remote_ptr = ipc_info[0]
                     src_base_ptr = remote_ptr.value
 
@@ -997,11 +1199,13 @@ class LocalPDConnector(KVConnectorBase_V1):
         )
 
         elapsed = (_time.monotonic() - t0) * 1000
-        logger.info(
+        logger.debug(
             "IPC KV async launched for prefix=%s: %d layers, %d tokens "
-            "from %d ranks in %.1fms (decode=%s, prefill=%s)",
+            "from %d ranks (prefill_ranks=%s, decode_rank=%d) in %.1fms "
+            "(decode=%s, prefill=%s)",
             prefix, layers_injected, actual_tokens,
-            cp_world_size, elapsed, decode_req_id, prefill_req_id,
+            cp_world_size, prefill_rank_map, my_global_rank, elapsed,
+            decode_req_id, prefill_req_id,
         )
 
     def _start_load_kv_legacy(
@@ -1011,8 +1215,7 @@ class LocalPDConnector(KVConnectorBase_V1):
         prefix: str,
     ) -> None:
         """Load KV from _gpu_kv_buffer (legacy all-gather path)."""
-        import time as _time
-
+        
         kv_buf = self._gpu_kv_buffer.get(prefix)
         if kv_buf is None:
             logger.error("No GPU KV buffer for prefix=%s", prefix)
@@ -1052,7 +1255,7 @@ class LocalPDConnector(KVConnectorBase_V1):
         del self._gpu_kv_buffer[prefix]
 
         _elapsed = (_time.monotonic() - _t0) * 1000
-        logger.info(
+        logger.debug(
             "KV injected (legacy) for prefix=%s: %d layers in %.1fms",
             prefix, layers_injected, _elapsed,
         )
@@ -1065,7 +1268,7 @@ class LocalPDConnector(KVConnectorBase_V1):
         """
         if not self._ipc_pending_events:
             return
-        if getattr(self, '_ipc_gpu_synced', False):
+        if self._ipc_gpu_synced:
             return
         # On first call, insert GPU-level wait for ALL pending IPC events.
         # After this, default stream won't execute until IPC stream finishes.
@@ -1100,10 +1303,13 @@ class LocalPDConnector(KVConnectorBase_V1):
         if not metadata.has_store_requests:
             return
 
-        # In IPC mode with multi-rank CP, KV is already in paged buffers.
+        # In IPC mode, KV is already in paged buffers.
         # No extraction needed — decode reads directly via IPC.
-        cp_size = getattr(attn_metadata, "num_dycp_reqs", 0)
-        if self._ipc_initialized and self._cp_world_size > 1 and cp_size > 0:
+        # This applies to ALL PD store requests (including CP=1),
+        # because in DMP architecture, prefill and decode may run
+        # on different workers, making per-worker _gpu_kv_buffer
+        # unreliable.
+        if self._ipc_initialized and metadata.has_store_requests:
             return
 
         is_mla = isinstance(attn_metadata, MLACommonMetadata)
@@ -1139,7 +1345,7 @@ class LocalPDConnector(KVConnectorBase_V1):
     def wait_for_save(self):
         """In IPC mode: no-op. KV stays in each rank's paged buffer."""
         if not self._pending_local_kv:
-            logger.info("wait_for_save: IPC mode, no-op (0ms)")
+            logger.debug("wait_for_save: IPC mode, no-op (0ms)")
             return
 
     def get_finished(
@@ -1161,6 +1367,7 @@ class LocalPDConnector(KVConnectorBase_V1):
         if self._cuda_lib and self._ipc_pending_events:
             event_query_fn = self._cuda_lib.funcs["cudaEventQuery"]
             completed: list[str] = []
+            errored: list[str] = []
             for decode_req_id, (event, prefill_req_id) in (
                 self._ipc_pending_events.items()
             ):
@@ -1169,12 +1376,28 @@ class LocalPDConnector(KVConnectorBase_V1):
                     completed.append(decode_req_id)
                     if prefill_req_id:
                         finished_sending.add(prefill_req_id)
-            for did in completed:
-                del self._ipc_pending_events[did]
+                elif result != 600:  # not cudaErrorNotReady → CUDA error
+                    errored.append(decode_req_id)
+                    logger.error(
+                        "cudaEventQuery returned %d for decode_req=%s, "
+                        "forcing cleanup (prefill blocks will be freed)",
+                        result, decode_req_id,
+                    )
+                    if prefill_req_id:
+                        finished_sending.add(prefill_req_id)
+            for did in completed + errored:
+                event_ptr, _ = self._ipc_pending_events.pop(did)
+                # Destroy CUDA event to prevent resource leak.
+                try:
+                    self._cuda_lib.CUDART_CHECK(
+                        self._cuda_lib.funcs["cudaEventDestroy"](event_ptr)
+                    )
+                except Exception:
+                    pass
             # Reset gpu sync flag for next batch
             if completed:
                 self._ipc_gpu_synced = False
-                logger.info(
+                logger.debug(
                     "get_finished: IPC done, freeing prefill blocks %s",
                     finished_sending,
                 )
@@ -1188,3 +1411,43 @@ class LocalPDConnector(KVConnectorBase_V1):
             finished_sending if finished_sending else None,
             load_req_ids if load_req_ids else None,
         )
+
+    def __del__(self) -> None:
+        # Destroy pending CUDA events to prevent resource leaks on shutdown.
+        if self._cuda_lib and hasattr(self, '_ipc_pending_events'):
+            destroy_fn = self._cuda_lib.funcs.get("cudaEventDestroy")
+            for _, (event_ptr, _) in self._ipc_pending_events.items():
+                if destroy_fn and event_ptr:
+                    try:
+                        destroy_fn(event_ptr)
+                    except Exception:
+                        pass
+            self._ipc_pending_events.clear()
+        # Destroy the dedicated IPC CUDA stream.
+        if self._cuda_lib and hasattr(self, '_ipc_stream') and self._ipc_stream:
+            destroy_fn = self._cuda_lib.funcs.get("cudaStreamDestroy")
+            if destroy_fn:
+                try:
+                    destroy_fn(self._ipc_stream)
+                except Exception:
+                    pass
+            self._ipc_stream = None
+        # Close IPC memory handles to release GPU virtual address space.
+        self._close_ipc_handles()
+
+    def _close_ipc_handles(self) -> None:
+        """Close all opened IPC memory handles to release GPU VA space."""
+        if not (self._cuda_lib and hasattr(self, '_remote_ipc_info')
+                and self._remote_ipc_info):
+            return
+        close_fn = self._cuda_lib.funcs.get("cudaIpcCloseMemHandle")
+        if not close_fn:
+            return
+        for rank_info in self._remote_ipc_info.values():
+            for layer_info in rank_info.values():
+                ptr = layer_info[0]
+                try:
+                    self._cuda_lib.CUDART_CHECK(close_fn(ptr))
+                except Exception:
+                    pass
+        self._remote_ipc_info.clear()

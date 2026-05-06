@@ -594,6 +594,15 @@ class Worker(WorkerBase):
         if isinstance(scheduler_outputs, list):
             scheduler_output = scheduler_outputs[self.model_runner.dycp_rank]
             if scheduler_output.total_num_scheduled_tokens == 0 and not scheduler_output.none_tokens_in_peer_sched:
+                logger.debug(
+                    "DYCP_NCCL: idle rank %d running _dummy_run, "
+                    "actual_cp_size=%d num_cp_request=%d "
+                    "none_tokens_in_peer_sched=%s",
+                    self.model_runner.dycp_rank,
+                    scheduler_output.actual_cp_size,
+                    scheduler_output.num_cp_request,
+                    scheduler_output.none_tokens_in_peer_sched,
+                )
                 self.model_runner._dummy_run(1, uniform_decode=True)
         else:
             scheduler_output = scheduler_outputs

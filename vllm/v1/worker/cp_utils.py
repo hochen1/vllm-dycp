@@ -6,7 +6,11 @@ import torch
 import numpy as np
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.v1.utils import CpuGpuBuffer
-from vllm.distributed.parallel_state import get_pcp_group, get_dycp_group
+from vllm.distributed.parallel_state import (
+    get_pcp_group,
+    get_dycp_group,
+    get_dycp_subgroup,
+)
 from vllm.logger import logger
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -34,6 +38,12 @@ class PCPManager:
         self.pcp_world_size = pcp_world_size
         self.pcp_rank = pcp_rank
         self.device = device
+        try:
+            self.dycp_rank = get_dycp_group().rank_in_group
+            self.dycp_world_size = get_dycp_group().world_size
+        except AssertionError:
+            self.dycp_rank = 0
+            self.dycp_world_size = 1
 
         # Pre-division buffers may need to be larger than post-division
         # buffers when DyCP schedules multiple CP requests per round.
@@ -92,6 +102,7 @@ class PCPManager:
         arange_np: np.ndarray,
         num_reqs: int,
         reorder_batch_threshold: int | None = None,
+        effective_pcp_world_size: int | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """
         Update token counts and positions for Prefill Context Parallelism (PCP).
@@ -122,6 +133,8 @@ class PCPManager:
                        efficient batched arange operations.
             num_reqs: Total number of requests in the batch.
             reorder_batch_threshold: Threshold for decode vs prefill requests.
+            effective_pcp_world_size: Override for pcp_world_size (used by DyCP
+                to pass actual_cp_size). When None, uses self.pcp_world_size.
 
         Returns:
             Tuple (pcp_tokens, pcp_positions):
@@ -146,6 +159,18 @@ class PCPManager:
         if num_reqs == 0 or len(num_scheduled_tokens) == 0:
             return np.array([], dtype=np.int32), np.array([], dtype=np.int32)
 
+        # Resolve effective world size and rank for DyCP parameterization.
+        pcp_world_size = (
+            effective_pcp_world_size
+            if effective_pcp_world_size is not None
+            else self.pcp_world_size
+        )
+        pcp_rank = (
+            self.dycp_rank % pcp_world_size
+            if effective_pcp_world_size is not None
+            else self.pcp_rank
+        )
+
         assert reorder_batch_threshold is not None, (
             "PCP depends on reorder batch to split decode and prefill requests."
         )
@@ -155,13 +180,13 @@ class PCPManager:
         # DualChunkSwap requires alignment to a multiple of (2 * pcp_world_size).
         # We first pad each request's token count up to that multiple.
         num_padded_scheduled_tokens = np.ceil(
-            num_scheduled_tokens / (2 * self.pcp_world_size)
-        ).astype(np.int32) * (2 * self.pcp_world_size)
+            num_scheduled_tokens / (2 * pcp_world_size)
+        ).astype(np.int32) * (2 * pcp_world_size)
 
         # PCP does not split decode requests. For decode requests, we instead
         # duplicate the scheduled tokens across the pcp_world_size ranks.
         num_padded_scheduled_tokens[:num_decode_reqs] = (
-            num_scheduled_tokens[:num_decode_reqs] * self.pcp_world_size
+            num_scheduled_tokens[:num_decode_reqs] * pcp_world_size
         )
 
         # Record how many pads were added per request (padded - original).
@@ -181,7 +206,7 @@ class PCPManager:
             < np.repeat(num_scheduled_tokens, num_padded_scheduled_tokens)
         )
 
-        pcp_tokens = num_padded_scheduled_tokens // self.pcp_world_size
+        pcp_tokens = num_padded_scheduled_tokens // pcp_world_size
 
         # Compute per-request "chunk sizes" for the head/tail splitting.
         # For prefill requests, we further split the pcp_tokens into two chunks
@@ -217,7 +242,7 @@ class PCPManager:
             head_start_loc = positions_start_loc + rank * pcp_chunk_sizes
             tail_start_loc = (
                 positions_start_loc
-                + (2 * self.pcp_world_size - rank - 1) * pcp_chunk_sizes
+                + (2 * pcp_world_size - rank - 1) * pcp_chunk_sizes
             )
             # Fill head positions using chunk arange offset by head_start_loc.
             positions[pcp_head_chunk_mask] = pcp_chunk_arange + np.repeat(
@@ -231,7 +256,7 @@ class PCPManager:
             )
             return positions
 
-        positions = get_current_rank_positions(0, self.pcp_rank)
+        positions = get_current_rank_positions(0, pcp_rank)
         # Decode tokens are duplicated only after AG. But their positions are
         # same without prefill context parallel.
         if num_decode_reqs > 0:
@@ -254,7 +279,7 @@ class PCPManager:
                     "num_reqs=%d world=%d",
                     num_clipped,
                     int(num_reqs),
-                    int(self.pcp_world_size),
+                    int(pcp_world_size),
                 )
 
         # Build the restore index used after allgather.
@@ -262,7 +287,7 @@ class PCPManager:
         padded_pos_start_loc[0] = 0
         all_positions_lst = [
             get_current_rank_positions(padded_pos_start_loc, rank_i)
-            for rank_i in range(self.pcp_world_size)
+            for rank_i in range(pcp_world_size)
         ]
         all_positions = np.concatenate(all_positions_lst)
         self.pcp_allgather_restore_idx.np[: all_positions.shape[0]] = (
@@ -275,12 +300,14 @@ class PCPManager:
             positions,
         )
 
-    def get_logits_indices(self, cu_num_tokens: np.ndarray, num_reqs: int):
+    def get_logits_indices(self, cu_num_tokens: np.ndarray, num_reqs: int,
+                           effective_world_size: int | None = None):
         if num_reqs == 0 or len(cu_num_tokens) == 0:
             return torch.empty((0,), dtype=torch.int64, device=self.device)
         num_pads = self.num_pcp_pads_cpu_tensor[:num_reqs].to(self.device)
+        world_size = effective_world_size if effective_world_size is not None else self.pcp_world_size
         return (
-            torch.from_numpy(cu_num_tokens).to(self.device) * self.pcp_world_size
+            torch.from_numpy(cu_num_tokens).to(self.device) * world_size
             - num_pads
             - 1
         )
@@ -291,12 +318,14 @@ class PCPManager:
         num_scheduled_tokens: np.ndarray,
         num_reqs: int,
         num_tokens_np: np.ndarray,
+        effective_world_size: int | None = None,
     ):
         if num_reqs == 0 or len(num_scheduled_tokens) == 0:
             return np.array([], dtype=bool)
+        world_size = effective_world_size if effective_world_size is not None else self.pcp_world_size
         return (
             num_computed_tokens_cpu[:num_reqs]
-            + num_scheduled_tokens * self.pcp_world_size
+            + num_scheduled_tokens * world_size
             - self.num_pcp_pads_cpu[:num_reqs]
         ) < num_tokens_np
 
@@ -370,10 +399,22 @@ class PCPManager:
         self,
         slot_mapping: torch.Tensor,
         num_tokens_unpadded: int,
+        actual_cp_size: int = 0,
     ) -> torch.Tensor:
         if num_tokens_unpadded == 0:
             return slot_mapping[:0]
-        slot_mapping = get_dycp_group().all_gather(
+        dycp_group = (
+            get_dycp_subgroup(actual_cp_size)
+            if actual_cp_size > 1
+            and actual_cp_size < self.dycp_world_size
+            else get_dycp_group()
+        )
+        logger.debug(
+            "DYCP_NCCL: restore_slot_mapping all_gather rank=%d "
+            "cp_size=%d group_ws=%d tokens=%d",
+            self.dycp_rank, actual_cp_size,
+            dycp_group.world_size, num_tokens_unpadded)
+        slot_mapping = dycp_group.all_gather(
             slot_mapping[:num_tokens_unpadded],
             0,
         )
@@ -407,13 +448,25 @@ class PCPManager:
         )
 
     def get_dycp_restore_hidden_states(
-        self, hidden_states: torch.Tensor, num_tokens_unpadded: int
+        self, hidden_states: torch.Tensor, num_tokens_unpadded: int,
+        actual_cp_size: int = 0,
     ):
         # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx
         # ignores the padding from CUDA Graph.
         if num_tokens_unpadded == 0:
             return hidden_states[:0]
-        hidden_states = get_dycp_group().all_gather(
+        dycp_group = (
+            get_dycp_subgroup(actual_cp_size)
+            if actual_cp_size > 1
+            and actual_cp_size < self.dycp_world_size
+            else get_dycp_group()
+        )
+        logger.debug(
+            "DYCP_NCCL: restore_hidden_states all_gather rank=%d "
+            "cp_size=%d group_ws=%d tokens=%d",
+            self.dycp_rank, actual_cp_size,
+            dycp_group.world_size, num_tokens_unpadded)
+        hidden_states = dycp_group.all_gather(
             hidden_states[:num_tokens_unpadded],
             0,
         )

@@ -247,7 +247,9 @@ class CrossDPKVCacheCoordinatorNoPrefixCache:
                 manager_blocks = manager.req_to_blocks.get(request_id, [])
                 rank_blocks.append(manager_blocks)
             
-            if any(rank_blocks) is not None:
+            # Always append: the list must have one entry per rank so that
+            # CrossDPKVCacheManager.get_blocks can index by rank number.
+            if True:  # any(rank_blocks) is not None
                 blocks_by_rank.append(tuple(rank_blocks))
         
         return blocks_by_rank
@@ -360,9 +362,13 @@ class CrossDPKVCacheManager:
         """
         if len(cp_ranks) > self.cp_size:
             raise ValueError("cp_ranks can not greater than cp_size")
-        
-        if len(cp_ranks) != 1 and len(cp_ranks) != self.cp_size:
-            raise NotImplementedError
+
+        n = len(cp_ranks)
+        if n != 1 and (n & (n - 1) != 0 or self.cp_size % n != 0):
+            raise ValueError(
+                f"len(cp_ranks)={n} must be 1, a power of 2, and a factor "
+                f"of cp_size={self.cp_size}"
+            )
 
         if num_new_tokens == 0:
             raise ValueError("num_new_tokens must be greater than 0")

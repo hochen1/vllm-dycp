@@ -115,6 +115,12 @@ class CommonAttentionMetadata:
 
     num_dycp_reqs: int = 0
     num_dycp_tokens: int = 0
+    actual_cp_size: int = 1
+
+    dycp_full_interleave_slot_mapping: torch.Tensor | None = None
+    """Slot mapping for all interleave-assigned positions in the allgathered KV.
+    Used to write back full KV to paged cache after DyCP allgather, filling
+    positions missed by the DualChunkSwap-based first write."""
 
     @property
     @deprecated(
@@ -181,6 +187,7 @@ class CommonAttentionMetadata:
             pcp_allgather_restore_idx=self.pcp_allgather_restore_idx,
             num_dycp_reqs=self.num_dycp_reqs,
             num_dycp_tokens=self.num_dycp_tokens,
+            actual_cp_size=self.actual_cp_size,
         )
 
 
@@ -1198,14 +1205,37 @@ def compute_causal_conv1d_metadata(query_start_loc_p: torch.Tensor):
 
 def get_cp_local_seq_lens(
     seq_lens: torch.Tensor,
-    cp_world_size: int = 1,
-    cp_rank: int | None = None,
+    cp_world_size: "int | torch.Tensor" = 1,
+    cp_rank: "int | None" = None,
     cp_kv_cache_interleave_size: int = 1,
 ) -> torch.Tensor:
     """While using dcp or pcp, kv_cache size stored on each rank may be different,
     use this function to calculate split decode seq_lens of each cp rank.
+
+    When cp_world_size is a per-request tensor (DyCP), cp_rank must be a scalar
+    global rank; the per-request rank is derived as cp_rank % cp_world_size[i].
     """
     num_requests = seq_lens.size(0)
+    seq_lens_i32 = seq_lens.to(torch.int32)
+
+    if isinstance(cp_world_size, torch.Tensor):
+        # Per-request cp_world_size (DyCP path)
+        assert cp_rank is not None
+        cp_ws = cp_world_size.to(torch.int32)
+        cp_ranks = cp_rank % cp_ws
+        base = (
+            seq_lens_i32 // cp_kv_cache_interleave_size // cp_ws
+            * cp_kv_cache_interleave_size
+        )
+        remainder = seq_lens_i32 - base * cp_ws
+        remainder = torch.clip(
+            remainder - cp_ranks * cp_kv_cache_interleave_size,
+            0,
+            cp_kv_cache_interleave_size,
+        )
+        return base + remainder
+
+    # Scalar cp_world_size (original path)
     if cp_rank is None:
         rank_offsets = (
             torch.arange(cp_world_size, dtype=torch.int32, device=seq_lens.device)
@@ -1214,12 +1244,9 @@ def get_cp_local_seq_lens(
         )
     else:
         rank_offsets = torch.tensor(
-            # torch.arange(cp_world_size, dtype=torch.int32, device=seq_lens.device)
             [[cp_rank]], dtype=torch.int32, device=seq_lens.device
         )
-    seq_lens_tiled = (
-        seq_lens.to(torch.int32).unsqueeze(-1).repeat(1, rank_offsets.shape[1])
-    )
+    seq_lens_tiled = seq_lens_i32.unsqueeze(-1).repeat(1, rank_offsets.shape[1])
     base = (
         seq_lens_tiled
         // cp_kv_cache_interleave_size

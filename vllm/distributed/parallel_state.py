@@ -1121,11 +1121,30 @@ def get_pcp_group() -> GroupCoordinator:
 
 
 _DYCP: GroupCoordinator | None = None
+_DYCP_SUBGROUPS: dict[int, GroupCoordinator] = {}
 
 
 def get_dycp_group()  -> GroupCoordinator:
     assert _DYCP is not None, "Dynamic context parallel group is not initialized"
     return _DYCP
+
+
+def get_dycp_subgroup(cp_size: int) -> GroupCoordinator:
+    """Get the NCCL subgroup for a specific DyCP cp_size.
+
+    Each cp_size has pre-created aligned subgroups where ranks start
+    at multiples of cp_size. Falls back to the full DYCP group if
+    cp_size equals dp_per_domain.
+    """
+    assert _DYCP_SUBGROUPS, (
+        "DyCP subgroups are not initialized. "
+        "Ensure cp_size_thresholds is configured."
+    )
+    assert cp_size in _DYCP_SUBGROUPS, (
+        f"No DyCP subgroup for cp_size={cp_size}. "
+        f"Available: {list(_DYCP_SUBGROUPS.keys())}"
+    )
+    return _DYCP_SUBGROUPS[cp_size]
 
 @contextmanager
 def graph_capture(device: torch.device):
@@ -1347,6 +1366,28 @@ def initialize_model_parallel(
         backend,
         group_name="dycp",
     )
+
+    # Build DyCP size-specific subgroups for dynamic CP.
+    global _DYCP_SUBGROUPS
+    if config.parallel_config.dycp_enabled:
+        dp_per_domain = config.parallel_config.dp_per_domain
+        for cp_size in config.parallel_config.dycp_all_cp_sizes:
+            if cp_size == 1:
+                continue
+            # Create aligned subgroups: ranks [start, start+cp_size)
+            # for each domain
+            sub_groups = []
+            for domain_group in domain_groups:
+                for start_idx in range(0, dp_per_domain, cp_size):
+                    sub_groups.append(
+                        domain_group[start_idx:start_idx + cp_size]
+                    )
+            _DYCP_SUBGROUPS[cp_size] = init_model_parallel_group(
+                sub_groups,
+                get_world_group().local_rank,
+                backend,
+                group_name=f"dycp_cp{cp_size}",
+            )
 
     # Build the tensor model-parallel groups.
     global _TP
@@ -1593,6 +1634,16 @@ def destroy_model_parallel():
     if _EP:
         _EP.destroy()
     _EP = None
+
+    global _DYCP
+    if _DYCP:
+        _DYCP.destroy()
+    _DYCP = None
+
+    global _DYCP_SUBGROUPS
+    for subgroup in _DYCP_SUBGROUPS.values():
+        subgroup.destroy()
+    _DYCP_SUBGROUPS = {}
 
 
 def destroy_distributed_environment():

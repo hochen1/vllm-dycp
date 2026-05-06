@@ -396,6 +396,7 @@ class EngineArgs:
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
     dcp_kv_cache_interleave_size: int = ParallelConfig.dcp_kv_cache_interleave_size
     cp_kv_cache_interleave_size: int = ParallelConfig.cp_kv_cache_interleave_size
+    cp_size_thresholds: str | None = None
     data_parallel_size: int = ParallelConfig.data_parallel_size
     data_parallel_rank: int | None = None
     data_parallel_start_rank: int | None = None
@@ -782,6 +783,14 @@ class EngineArgs:
         parallel_group.add_argument(
             "--cp-kv-cache-interleave-size",
             **parallel_kwargs["cp_kv_cache_interleave_size"],
+        )
+        parallel_group.add_argument(
+            "--cp-size-thresholds",
+            type=str,
+            default=None,
+            help="DyCP threshold config as JSON: list of "
+            "[token_threshold, cp_size] pairs. "
+            "Example: '[(4096, 1), (16384, 4), (32768, 8)]'",
         )
         parallel_group.add_argument(
             "--prefill-context-parallel-size",
@@ -1322,6 +1331,31 @@ class EngineArgs:
         )
         return SpeculativeConfig(**self.speculative_config)
 
+    def _parse_cp_size_thresholds(self) -> list[tuple[int, int]]:
+        if self.cp_size_thresholds is None:
+            return []
+        import ast
+        try:
+            parsed = ast.literal_eval(self.cp_size_thresholds)
+        except (ValueError, SyntaxError) as e:
+            raise ValueError(
+                f"Failed to parse --cp-size-thresholds: {e}. "
+                "Expected format: '[(4096, 1), (16384, 4), (32768, 8)]'"
+            ) from e
+        if not isinstance(parsed, list):
+            raise ValueError(
+                "--cp-size-thresholds must be a list of (threshold, cp_size) tuples"
+            )
+        result = []
+        for item in parsed:
+            if not (isinstance(item, (list, tuple)) and len(item) == 2):
+                raise ValueError(
+                    f"Each entry in cp_size_thresholds must be a "
+                    f"(threshold, cp_size) pair, got {item}"
+                )
+            result.append((int(item[0]), int(item[1])))
+        return result
+
     def create_engine_config(
         self,
         usage_context: UsageContext | None = None,
@@ -1597,6 +1631,7 @@ class EngineArgs:
             decode_context_parallel_size=self.decode_context_parallel_size,
             dcp_kv_cache_interleave_size=self.dcp_kv_cache_interleave_size,
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
+            cp_size_thresholds=self._parse_cp_size_thresholds(),
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
 

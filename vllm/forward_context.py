@@ -47,9 +47,17 @@ class BatchDescriptor(NamedTuple):
     Whether this batch has active LoRA adapters.
     """
 
-    num_cp_tokens: int = 0
+    num_cp_request: int = 0
     """
-    For cp tokens
+    Number of CP (Context Parallel) requests in the batch.
+    Used as 2nd dimension of DyCP CUDA graph key: (num_tokens, num_cp_request, cp_size).
+    """
+
+    cp_size: int = 1
+    """
+    Actual CP size for this batch. Used as 3rd dimension of CUDA graph key
+    when DyCP is enabled, since different cp_sizes use different NCCL subgroups
+    baked into the graph.
     """
     
     def relax_for_mixed_batch_cudagraphs(self) -> "BatchDescriptor":
