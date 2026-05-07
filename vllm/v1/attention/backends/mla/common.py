@@ -3394,12 +3394,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 )
             decode_dycp_reqs = min(attn_metadata.num_dycp_reqs, attn_metadata.num_decodes)
             if decode_dycp_reqs > 0:
-                # attn_out = dycp_lse_out_ar(
-                #     attn_out,
-                #     lse,
-                #     get_dycp_group(),
-                #     num_dycp_reqs=attn_metadata.num_dycp_reqs,
-                # )
                 attn_out[:decode_dycp_reqs] = cp_lse_ag_out_ar(
                     attn_out[:decode_dycp_reqs],
                     lse[:decode_dycp_reqs],

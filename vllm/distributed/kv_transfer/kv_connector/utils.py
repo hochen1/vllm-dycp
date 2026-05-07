@@ -163,21 +163,41 @@ class KVOutputAggregator:
             req_ids: set[str] | None,
             remaining_count_dict: dict[str, int],
             finished_set: set[str],
+            req_id_to_cp_size: dict[str, int] | None = None,
+            direction: str = "recv",
         ) -> None:
             for req_id in req_ids or ():
-                remaining_count = remaining_count_dict.get(
-                    req_id, self._expected_finished_count
-                )
-                remaining_count_dict[req_id] = remaining_count - 1
-                if remaining_count_dict[req_id] == 0:
+                cp_size = req_id_to_cp_size.get(req_id, 1) if req_id_to_cp_size else 1
+                if cp_size > 1:
+                    default_count = self._expected_finished_count * cp_size
+                else:
+                    default_count = 1
+                prev_remaining = remaining_count_dict.get(req_id, default_count)
+                new_remaining = prev_remaining - 1
+                remaining_count_dict[req_id] = new_remaining
+                if new_remaining == 0:
                     finished_set.add(req_id)
                     del remaining_count_dict[req_id]
+                logger.info(
+                    "[PD][aggregate_domain] %s vote: req=%s cp_size=%d "
+                    "default_count=%d prev_remaining=%d new_remaining=%d "
+                    "expected_finished_count=%d finished=%s",
+                    direction,
+                    req_id,
+                    cp_size,
+                    default_count,
+                    prev_remaining,
+                    new_remaining,
+                    self._expected_finished_count,
+                    new_remaining == 0,
+                )
 
         finished_sending = set[str]()
         finished_recving = set[str]()
         aggregated_kv_connector_stats = None
         combined_kv_cache_events = None
         invalid_block_ids = set[int]()
+        req_id_to_cp_size: dict[str, int] = {}
         for model_runner_output in outputs:
             # assert model_runner_output is not None
             if not isinstance(model_runner_output, ModelRunnerOutput):
@@ -199,11 +219,28 @@ class KVOutputAggregator:
                 self._expected_finished_count = kv_output.expected_finished_count
 
             update_finished_set(
-                kv_output.finished_sending, self._send_remaining_count, finished_sending
+                kv_output.finished_sending,
+                self._send_remaining_count,
+                finished_sending,
+                kv_output.req_id_to_cp_size,
+                direction="send",
             )
             update_finished_set(
-                kv_output.finished_recving, self._recv_remaining_count, finished_recving
+                kv_output.finished_recving,
+                self._recv_remaining_count,
+                finished_recving,
+                kv_output.req_id_to_cp_size,
+                direction="recv",
             )
+            if kv_output.finished_sending or kv_output.finished_recving:
+                logger.info(
+                    "[PD][aggregate_domain] worker kv_output: req_cp_sizes=%s "
+                    "finished_send=%s finished_recv=%s expected_finished_count=%d",
+                    kv_output.req_id_to_cp_size or {},
+                    sorted(kv_output.finished_sending) if kv_output.finished_sending else [],
+                    sorted(kv_output.finished_recving) if kv_output.finished_recving else [],
+                    kv_output.expected_finished_count,
+                )
 
             # Aggregate kv_connector_stats from all workers.
             if aggregated_kv_connector_stats is None:
@@ -238,6 +275,16 @@ class KVOutputAggregator:
         # select output of the worker specified by output_rank
         # output = outputs[output_rank]
 
+        logger.info(
+            "[PD][aggregate_domain] aggregated result: finished_send=%s "
+            "finished_recv=%s remaining_send=%s remaining_recv=%s req_cp_sizes=%s",
+            sorted(finished_sending),
+            sorted(finished_recving),
+            dict(sorted(self._send_remaining_count.items())),
+            dict(sorted(self._recv_remaining_count.items())),
+            req_id_to_cp_size,
+        )
+
         for output in outputs:
             # assert output is not None
             if not isinstance(output, ModelRunnerOutput):
@@ -249,6 +296,7 @@ class KVOutputAggregator:
                 kv_cache_events=combined_kv_cache_events or None,
                 invalid_block_ids=invalid_block_ids,
                 expected_finished_count=self._expected_finished_count,
+                req_id_to_cp_size=req_id_to_cp_size or None,
             )
 
         return outputs

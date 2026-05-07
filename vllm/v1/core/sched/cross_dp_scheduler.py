@@ -219,6 +219,7 @@ class CrossDPScheduler(Scheduler):
             max_num_seqs=self.max_num_running_reqs,
         )
         self._last_batch_phase: str | None = None
+        self._kv_recv_completed: set[str] = set()
 
     def _get_request_batch_phase(self, request: Request) -> str:
         """Classify request into the scheduler batch phase.
@@ -347,7 +348,8 @@ class CrossDPScheduler(Scheduler):
         delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)
         request_id = request.request_id
-        for cp_rank in request.cp_ranks:    
+        self._kv_recv_completed.discard(request_id)
+        for cp_rank in request.cp_ranks:
             self.finished_req_ids[cp_rank].add(request_id)
 
         if self.finished_req_ids_dict is not None:
@@ -447,6 +449,49 @@ class CrossDPScheduler(Scheduler):
 
         self.finished_recving_kv_req_ids.remove(request.request_id)
         return True
+
+    def _update_from_kv_xfer_finished(
+        self, kv_connector_output: KVConnectorOutput
+    ):
+        """Override for domain-mode PD separation.
+
+        aggregate_domain() already counts across all DP workers: it only
+        puts a req_id into ``finished_recving`` after ALL workers have
+        reported completion.  The scheduler therefore does NOT need a
+        second layer of per-cp-rank counting — it can mark the request
+        as done immediately.  A completed-set guards against duplicate
+        reports (the same aggregated result is written to every worker
+        output, so _update_from_kv_xfer_finished is called once per DP
+        rank per step).
+        """
+        if self.connector is not None:
+            self.connector.update_connector_output(kv_connector_output)
+
+        if kv_connector_output.finished_recving:
+            logger.info(
+                "[PD] scheduler recv input: finished_recving=%s req_cp_sizes=%s "
+                "completed=%s",
+                sorted(kv_connector_output.finished_recving),
+                kv_connector_output.req_id_to_cp_size or {},
+                sorted(self._kv_recv_completed),
+            )
+
+        for req_id in kv_connector_output.finished_recving or ():
+            if req_id in self._kv_recv_completed:
+                continue
+
+            self.finished_recving_kv_req_ids.add(req_id)
+            self._kv_recv_completed.add(req_id)
+            request = self.requests.get(req_id)
+            num_cp_ranks = len(request.cp_ranks) if request else 0
+            logger.info(
+                "[PD] KV recv complete: req=%s num_cp_ranks=%d",
+                req_id, num_cp_ranks,
+            )
+
+        for req_id in kv_connector_output.finished_sending or ():
+            if req_id in self.requests:
+                self._free_blocks(self.requests[req_id])
 
     def update_from_output(
         self,

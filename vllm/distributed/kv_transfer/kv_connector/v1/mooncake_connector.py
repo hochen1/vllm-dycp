@@ -246,6 +246,13 @@ class MooncakeConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
 
+    def get_req_id_to_cp_size(self) -> dict[str, int] | None:
+        """Return per-request CP size for aggregate_domain()."""
+        if self.connector_worker is not None:
+            sizes = self.connector_worker._req_cp_sizes
+            return sizes if sizes else None
+        return None
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, MooncakeConnectorMetadata)
@@ -635,6 +642,7 @@ class MooncakeConnectorWorker:
             set(), asyncio.Lock()
         )
         self._recv_pending_counts: dict[str, int] = {}
+        self._req_cp_sizes: dict[str, int] = {}
 
         self.block_size = vllm_config.cache_config.block_size
         self.model_config = vllm_config.model_config
@@ -1116,6 +1124,33 @@ class MooncakeConnectorWorker:
         if not src_ptrs:
             return
 
+        # Verify source KV data is non-zero before RDMA write.
+        if self.device_kv_caches and send_reqs:
+            try:
+                first_cache = next(iter(self.device_kv_caches.values()))
+                first_req_id = send_reqs[0][0]
+                first_meta = send_reqs[0][1]
+                if first_meta.local_block_ids:
+                    bid = first_meta.local_block_ids[0]
+                    # first_cache: [2, num_blocks, block_size, ...] for
+                    # split_k_and_v; index [0, bid] to get K of block bid.
+                    k_blk = first_cache[0, bid].float()
+                    blk_sum = k_blk.abs().sum().item()
+                    blk_max = k_blk.abs().max().item()
+                    nonzero = int((k_blk != 0).sum().item())
+                    logger.info(
+                        "[PD] KV_VERIFY src: req=%s, block=%d, "
+                        "abs_sum=%.4f, abs_max=%.4f, "
+                        "nonzero=%d/%d, shape=%s, "
+                        "num_ops=%d, total_bytes=%d",
+                        first_req_id, bid, blk_sum, blk_max,
+                        nonzero, k_blk.numel(),
+                        list(k_blk.shape),
+                        len(src_ptrs), sum(lengths),
+                    )
+            except Exception as e:
+                logger.warning("[PD] KV_VERIFY src failed: %s", e)
+
         start_time = time.perf_counter()
         ret_value = self.engine.batch_transfer_sync_write(
             remote_session, src_ptrs, dst_ptrs, lengths
@@ -1234,12 +1269,14 @@ class MooncakeConnectorWorker:
         finished_recving_reqs = fut.result() if fut else set()
 
         if finished_sending_reqs or finished_recving_reqs:
-            logger.debug(
-                "Rank %s, get_finished: %s requests done sending "
-                "and %s requests done recving",
+            logger.info(
+                "[PD] worker get_finished: tp_rank=%d finished_send=%s "
+                "finished_recv=%s pending_recv=%s req_cp_sizes=%s",
                 self.tp_rank,
-                len(finished_sending_reqs),
-                len(finished_recving_reqs),
+                sorted(finished_sending_reqs),
+                sorted(finished_recving_reqs),
+                dict(sorted(self._recv_pending_counts.items())),
+                dict(sorted(self._req_cp_sizes.items())),
             )
 
         # Handle timeout to avoid stranding blocks on remote.
@@ -1334,16 +1371,116 @@ class MooncakeConnectorWorker:
         finished_ids = local_req_ids if local_req_ids else req_ids
         actually_finished = []
         for rid in finished_ids:
-            pending = self._recv_pending_counts.get(rid, 1) - 1
+            prev_pending = self._recv_pending_counts.get(rid, 1)
+            pending = prev_pending - 1
             if pending <= 0:
                 actually_finished.append(rid)
                 self._recv_pending_counts.pop(rid, None)
             else:
                 self._recv_pending_counts[rid] = pending
+            logger.info(
+                "[PD] receive_kv vote: req=%s prev_pending=%d new_pending=%d finished=%s",
+                rid,
+                prev_pending,
+                pending,
+                pending <= 0,
+            )
 
         if actually_finished:
             async with self.finished_recving_reqs.lock:
                 self.finished_recving_reqs.set.update(actually_finished)
+
+            # D-side KV verification: check blocks contain non-zero data
+            # after all P TP ranks have completed their RDMA writes.
+            if self.device_kv_caches:
+                try:
+                    import torch
+                    rid_to_blks = dict(zip(finished_ids, block_ids))
+                    first_cache = next(
+                        iter(self.device_kv_caches.values())
+                    )
+                    for rid in actually_finished:
+                        blk_ids = rid_to_blks.get(rid, [])
+                        if not blk_ids:
+                            continue
+                        # Check ALL blocks, not just the first one.
+                        block_checksums = []
+                        head_zero_blocks = []
+                        n_heads = 1
+                        for bi, bid in enumerate(blk_ids):
+                            k_blk = first_cache[0, bid].float()
+                            v_blk = first_cache[1, bid].float()
+                            k_sum = k_blk.abs().sum().item()
+                            v_sum = v_blk.abs().sum().item()
+                            k_nz = int((k_blk != 0).sum().item())
+                            v_nz = int((v_blk != 0).sum().item())
+                            n_heads = k_blk.shape[-2] if k_blk.dim() >= 2 else 1
+                            head_nz = []
+                            for h in range(n_heads):
+                                if k_blk.dim() >= 2:
+                                    hn = int(
+                                        (k_blk[..., h, :] != 0).sum().item()
+                                    )
+                                    head_nz.append(hn)
+                                    if hn == 0:
+                                        head_zero_blocks.append(
+                                            (bi, h)
+                                        )
+                                else:
+                                    head_nz.append(k_nz)
+                            block_checksums.append(
+                                (bid, k_sum, v_sum, k_nz, v_nz, head_nz)
+                            )
+                        # Log first block in detail.
+                        bid, k_sum, v_sum, k_nz, v_nz, head_nz = (
+                            block_checksums[0]
+                        )
+                        k_blk0 = first_cache[0, bid].float()
+                        k_max = k_blk0.abs().max().item()
+                        logger.info(
+                            "[PD] D_KV_VERIFY: req=%s, block=%d, "
+                            "K_sum=%.2f, K_max=%.4f, K_nz=%d/%d, "
+                            "V_sum=%.2f, V_nz=%d/%d, "
+                            "head_nz=%s, shape=%s, "
+                            "num_blocks=%d, cp_info=%s",
+                            rid, bid, k_sum, k_max,
+                            k_nz, k_blk0.numel(),
+                            v_sum, v_nz, v_blk.numel() if 'v_blk' in dir() else 0,
+                            head_nz, list(k_blk0.shape),
+                            len(blk_ids),
+                            cp_info if cp_info else "none",
+                        )
+                        # Log per-block summary for all blocks.
+                        blk_summary = "; ".join(
+                            f"b{bi}(id={bid}:K={ks:.0f}:V={vs:.0f}:Knz={kn}:Vnz={vn}:hnz={hn})"
+                            for bi, (bid, ks, vs, kn, vn, hn) in enumerate(
+                                block_checksums
+                            )
+                        )
+                        logger.info(
+                            "[PD] D_KV_VERIFY_ALL: req=%s, "
+                            "num_blocks=%d, n_heads=%d, "
+                            "head_zero_blocks=%s, blocks=[%s]",
+                            rid, len(blk_ids), n_heads,
+                            head_zero_blocks,
+                            blk_summary[:2000],
+                        )
+                except Exception as e:
+                    logger.warning("[PD] D_KV_VERIFY failed: %s", e)
+
+            # Synchronize CUDA to ensure all RDMA writes are visible
+            # to the GPU before marking the request as finished.
+            # This prevents the attention from reading stale data.
+            if actually_finished:
+                try:
+                    import torch
+                    torch.cuda.synchronize()
+                    logger.debug(
+                        "[PD] CUDA sync after KV recv for %s",
+                        actually_finished,
+                    )
+                except Exception as e:
+                    logger.warning("[PD] CUDA sync failed: %s", e)
 
         logger.info(
             "[PD] receive_kv: KV pull DONE for remote=%s local=%s "
@@ -1461,6 +1598,16 @@ class MooncakeConnectorWorker:
                     pull_counts[local_rid] += 1
             for local_rid, count in pull_counts.items():
                 self._recv_pending_counts[local_rid] = count
+            if pull_counts:
+                logger.info(
+                    "[PD] start_load_kv: recv pending counts=%s",
+                    dict(sorted(pull_counts.items())),
+                )
+
+            for req_id, meta in metadata.reqs_to_recv.items():
+                cp_size = meta.decode_cp_world_size
+                if cp_size > 1:
+                    self._req_cp_sizes[req_id] = cp_size
 
             for path, req_entries in kv_pulls.items():
                 logger.info(

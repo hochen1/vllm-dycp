@@ -120,6 +120,9 @@ class KVConnectorOutput:
     # It captures a static setup info and should almost always remain constant
     # for a given connector after discovery. Default value entails no change.
     expected_finished_count: int = 0
+    # Per-request CP size for DyCP: aggregate_domain() needs this to
+    # correctly wait for all CP ranks before marking a request finished.
+    req_id_to_cp_size: dict[str, int] | None = None
 
     def is_empty(self):
         return (
