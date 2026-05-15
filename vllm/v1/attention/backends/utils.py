@@ -1413,7 +1413,7 @@ def get_pcp_part_indices(
     starts = cu_num_tokens_np[:-1]  # [0, 2, 4]
     ends = cu_num_tokens_np[1:]  # [2, 4, 8]
     select_len = (ends - starts) * M // N  # [1, 1, 2], M=1, N=2
-    select_num_tokens = cu_num_tokens_np[-1] * M // N
+    select_num_tokens = select_len.sum()
 
     seq_ids = np.repeat(np.arange(len(select_len)), select_len)  # [0,1,2,2]
 
@@ -1515,8 +1515,15 @@ def reorder_batch_to_split_cp_and_normal(
         if scheduler_output.cp_rank_scheduled_tokens[req_id] <= 1
     ]
 
-    # Sort CP requests by deterministic hash so every rank sees the same order.
-    cp_indices.sort(key=lambda idx: _deterministic_hash(req_ids[idx]))
+    # Sort CP requests: decode (≤1 token) before prefill, then by
+    # deterministic hash so every rank sees the same order.  PCP's
+    # update_tokens_for_pcp assumes decode requests are contiguous at
+    # the front of the CP group.
+    num_sched = scheduler_output.num_scheduled_tokens
+    cp_indices.sort(key=lambda idx: (
+        0 if num_sched.get(req_ids[idx], 0) <= 1 else 1,
+        _deterministic_hash(req_ids[idx]),
+    ))
 
     target_order = cp_indices + ncp_indices
 
