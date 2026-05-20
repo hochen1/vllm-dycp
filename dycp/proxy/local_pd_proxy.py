@@ -31,13 +31,30 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-# Try to use vllm logger; fall back to standard logging.
+# Use vllm logger when available, but add a dedicated handler so proxy
+# logs are always visible regardless of how uvicorn / vllm configure the
+# global logging state.
 try:
     from vllm.logger import init_logger
-    logger = init_logger(__name__)
+
+    logger = init_logger("vllm.dycp.proxy.local_pd_proxy")
 except ImportError:
     logger = logging.getLogger(__name__)
-    logging.basicConfig(level=logging.INFO)
+
+# Ensure proxy logs go to stderr with a predictable format.  vLLM's
+# dictConfig only touches the "vllm" logger and uvicorn may reconfigure
+# root handlers later, so we attach our own handler unconditionally.
+if not logger.handlers:
+    _proxy_handler = logging.StreamHandler()
+    _proxy_handler.setFormatter(logging.Formatter(
+        fmt="%(levelname)s %(asctime)s [%(filename)s:%(lineno)d] %(message)s",
+        datefmt="%m-%d %H:%M:%S",
+    ))
+    _proxy_handler.setLevel(logging.DEBUG)
+    logger.addHandler(_proxy_handler)
+    logger.setLevel(logging.DEBUG)
+    # Prevent messages from being discarded by a no-handler root.
+    logger.propagate = False
 
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)  # 6 hours
 
@@ -270,6 +287,80 @@ def _build_decode_request(
 
 
 # ---------------------------------------------------------------------------
+# Response format conversion (completion → chat)
+# ---------------------------------------------------------------------------
+def _convert_completion_to_chat(resp: dict) -> dict:
+    """Convert a /v1/completions response to /v1/chat/completions format."""
+    resp["object"] = "chat.completion"
+    for choice in resp.get("choices", []):
+        text = choice.pop("text", "")
+        choice["message"] = {"role": "assistant", "content": text}
+    return resp
+
+
+def _convert_completion_chunk_to_chat(chunk: dict, is_first: bool) -> dict:
+    """Convert a /v1/completions streaming chunk to chat format."""
+    chunk["object"] = "chat.completion.chunk"
+    for choice in chunk.get("choices", []):
+        text = choice.pop("text", "")
+        delta = {}
+        if is_first:
+            delta["role"] = "assistant"
+        if text:
+            delta["content"] = text
+        choice["delta"] = delta
+    return chunk
+
+
+async def _convert_streaming_completion_to_chat(raw_chunks):
+    """Convert a streaming completion SSE response to chat SSE format.
+
+    Parses data lines from the SSE stream, converts each completion chunk
+    to chat completion chunk format, and re-emits as SSE.
+    """
+    line_buffer = b""
+    first_chunk = True
+
+    async for raw in raw_chunks:
+        line_buffer += raw
+        while b"\n" in line_buffer:
+            line, line_buffer = line_buffer.split(b"\n", 1)
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith(b"data: "):
+                payload = stripped[6:]
+                if payload == b"[DONE]":
+                    yield b"data: [DONE]\n\n"
+                    continue
+                try:
+                    chunk_data = json.loads(payload)
+                    _convert_completion_chunk_to_chat(chunk_data, first_chunk)
+                    first_chunk = False
+                    yield f"data: {json.dumps(chunk_data)}\n\n".encode()
+                except (json.JSONDecodeError, KeyError):
+                    yield line + b"\n"
+            else:
+                yield line + b"\n"
+
+    remaining = line_buffer.strip()
+    if remaining:
+        if remaining.startswith(b"data: "):
+            payload = remaining[6:]
+            if payload == b"[DONE]":
+                yield b"data: [DONE]\n\n"
+            else:
+                try:
+                    chunk_data = json.loads(payload)
+                    _convert_completion_chunk_to_chat(chunk_data, first_chunk)
+                    yield f"data: {json.dumps(chunk_data)}\n\n".encode()
+                except (json.JSONDecodeError, KeyError):
+                    yield remaining + b"\n"
+        else:
+            yield remaining + b"\n"
+
+
+# ---------------------------------------------------------------------------
 # Core PD flow
 # ---------------------------------------------------------------------------
 async def _do_prefill(
@@ -402,18 +493,38 @@ async def _handle_pd_request(endpoint: str, request: Request):
     if decode_req.pop("_use_token_ids", False):
         decode_endpoint = "/v1/completions"
 
+    needs_chat_conversion = (
+        endpoint == "/v1/chat/completions"
+        and decode_endpoint != endpoint
+    )
+
     logger.info(
-        "Starting decode [%s] endpoint=%s streaming=%s",
-        prefix, decode_endpoint, is_streaming,
+        "Starting decode [%s] endpoint=%s streaming=%s chat_conversion=%s",
+        prefix, decode_endpoint, is_streaming, needs_chat_conversion,
     )
 
     async def generate():
         try:
             session = await proxy_config.get_session()
-            async for chunk in _stream_decode(
+            raw_chunks = _stream_decode(
                 session, decode_endpoint, decode_req, decode_request_id,
-            ):
-                yield chunk
+            )
+            if needs_chat_conversion and not is_streaming:
+                body_parts = []
+                async for chunk in raw_chunks:
+                    body_parts.append(chunk)
+                full_body = b"".join(body_parts)
+                resp_data = json.loads(full_body)
+                _convert_completion_to_chat(resp_data)
+                yield json.dumps(resp_data).encode()
+            elif needs_chat_conversion and is_streaming:
+                async for converted in _convert_streaming_completion_to_chat(
+                    raw_chunks,
+                ):
+                    yield converted
+            else:
+                async for chunk in raw_chunks:
+                    yield chunk
         except aiohttp.ClientError as exc:
             logger.error("Decode connection error [%s]: %s", prefix, exc)
             error_payload = json.dumps({
@@ -529,18 +640,42 @@ async def _handle_pd_request_with_body(endpoint: str, original_body: dict):
     if decode_req.pop("_use_token_ids", False):
         decode_endpoint = "/v1/completions"
 
+    # When original request was chat but decode uses completions endpoint,
+    # we need to convert the response format back.
+    needs_chat_conversion = (
+        endpoint == "/v1/chat/completions"
+        and decode_endpoint != endpoint
+    )
+
     logger.info(
-        "Starting decode [%s] endpoint=%s streaming=%s",
-        prefix, decode_endpoint, is_streaming,
+        "Starting decode [%s] endpoint=%s streaming=%s chat_conversion=%s",
+        prefix, decode_endpoint, is_streaming, needs_chat_conversion,
     )
 
     async def generate():
         try:
             session = await proxy_config.get_session()
-            async for chunk in _stream_decode(
+            raw_chunks = _stream_decode(
                 session, decode_endpoint, decode_req, decode_request_id,
-            ):
-                yield chunk
+            )
+            if needs_chat_conversion and not is_streaming:
+                # Non-streaming: collect full response, convert, yield
+                body_parts = []
+                async for chunk in raw_chunks:
+                    body_parts.append(chunk)
+                full_body = b"".join(body_parts)
+                resp_data = json.loads(full_body)
+                _convert_completion_to_chat(resp_data)
+                yield json.dumps(resp_data).encode()
+            elif needs_chat_conversion and is_streaming:
+                # Streaming: convert SSE chunks
+                async for converted in _convert_streaming_completion_to_chat(
+                    raw_chunks,
+                ):
+                    yield converted
+            else:
+                async for chunk in raw_chunks:
+                    yield chunk
         except aiohttp.ClientError as exc:
             logger.error("Decode connection error [%s]: %s", prefix, exc)
             error_payload = json.dumps({

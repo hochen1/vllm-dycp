@@ -344,40 +344,22 @@ class MultiGroupBlockTable:
         num_speculative_tokens: int = 0,
         cp_kv_cache_interleave_size: int = 1,
     ) -> None:
-        # Note(hc): each dcp rank only store
-        # (max_model_len//dcp_world_size) tokens in kvcache,
-        # so the block_size which used for calc max_num_blocks_per_req
-        # must be multiplied by dcp_world_size.
-        try:
-            pcp_world_size = get_pcp_group().world_size
-        except AssertionError:
-            # PCP might not be initialized in testing
-            pcp_world_size = 1
-        try:
-            dcp_world_size = get_dcp_group().world_size
-        except AssertionError:
-            # DCP might not be initialized in testing
-            dcp_world_size = 1
-        try:
-            dycp_world_size = get_dycp_group().world_size
-        except AssertionError:
-            # DyCP might not be initialized in testing
-            dycp_world_size = 1
-
         if len(kernel_block_sizes) != len(block_sizes):
             raise ValueError(
                 f"kernel_block_sizes length ({len(kernel_block_sizes)}) "
                 f"must match block_sizes length ({len(block_sizes)})"
             )
 
-        total_cp_world_size = dcp_world_size * pcp_world_size * dycp_world_size
-
+        # max_num_blocks_per_req must accommodate the worst case:
+        # a DP request with the full KV cache on a single rank.
+        # CP requests distribute tokens across ranks and need fewer
+        # blocks per rank, but the block table is sized once.
         self.block_tables = [
             BlockTable(
                 block_size,
                 max_num_reqs,
                 max(
-                    cdiv(max_model_len, block_size * total_cp_world_size),
+                    cdiv(max_model_len, block_size),
                     1 + num_speculative_tokens,
                 ),
                 max_num_batched_tokens,

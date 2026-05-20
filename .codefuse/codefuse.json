@@ -1,0 +1,13 @@
+{
+  "workid": "WB02308786",
+  "token": "97b6a09e9197ee160dd4c0d31dbc31e6",
+  "model": "antchat/GLM-5.1",
+  "providerCategory": "",
+  "authType": "OAUTH",
+  "engine": "claude-code",
+  "hasManuallySwitchedModel": true,
+  "guided": true,
+  "language": "zh-CN",
+  "skipUpdateVersion": "",
+  "productType": "CODEFUSE_IDE"
+}

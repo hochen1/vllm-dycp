@@ -383,11 +383,11 @@ class LocalPDConnector(KVConnectorBase_V1):
         kv_params = request.kv_transfer_params
         logger.info(
             "get_num_new_matched_tokens called: req=%s, "
-            "num_computed=%d, kv_params=%s",
+            "num_computed=%d",
             request.request_id,
             num_computed_tokens,
-            kv_params,
         )
+        logger.debug("get_num_new_matched_tokens called: req=%s, num_computed=%d, kv_params=%s", request.request_id, num_computed_tokens, kv_params)
         if not kv_params:
             return 0, False
 
@@ -498,7 +498,7 @@ class LocalPDConnector(KVConnectorBase_V1):
         cp_rank = scheduler_output.cp_rank
 
         if cp_rank == 0:
-            logger.info(
+            logger.debug(
                 "build_connector_meta START: _prefill_requests=%s, "
                 "new_reqs=%d, num_sched=%s",
                 list(self._prefill_requests.keys())[:3],
@@ -665,7 +665,7 @@ class LocalPDConnector(KVConnectorBase_V1):
 
         store_count = sum(1 for r in meta.requests if r.is_store)
         load_count = sum(1 for r in meta.requests if not r.is_store)
-        logger.info(
+        logger.debug(
             "build_connector_meta cp_rank=%d: %d store, %d load requests",
             cp_rank, store_count, load_count,
         )
@@ -1139,7 +1139,7 @@ class LocalPDConnector(KVConnectorBase_V1):
     def wait_for_save(self):
         """In IPC mode: no-op. KV stays in each rank's paged buffer."""
         if not self._pending_local_kv:
-            logger.info("wait_for_save: IPC mode, no-op (0ms)")
+            logger.debug("wait_for_save: IPC mode, no-op (0ms)")
             return
 
     def get_finished(

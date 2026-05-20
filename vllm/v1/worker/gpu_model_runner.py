@@ -4864,8 +4864,9 @@ class GPUModelRunner(
         dtype_bytes = self.dtype.itemsize
         per_token_bytes = head_size * dtype_bytes
         # Profile already covers max_num_tokens of KV; reserve the delta
-        pre_div_tokens = num_cp_seqs * self.max_model_len
-        extra_tokens = max(0, pre_div_tokens - self.max_num_tokens)
+        # pre_div_tokens = num_cp_seqs * self.max_model_len
+        # extra_tokens = max(0, pre_div_tokens - self.max_num_tokens)
+        extra_tokens = (self.dycp_world_size-1) * self.max_model_len
         return extra_tokens * per_token_bytes
 
     def _get_profile_num_tokens(self) -> int:

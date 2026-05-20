@@ -929,8 +929,12 @@ class CrossDPScheduler(Scheduler):
                 )
                 logger.debug(f"new_blocks -- 2: {new_blocks}, request.cp_ranks: {request.cp_ranks}, num_new_tokens: {num_new_tokens}")
                 if new_blocks is None:
-                    # The request cannot be scheduled.
-                    break
+                    # The request cannot be scheduled right now.
+                    # Pop it from waiting and skip so other requests
+                    # get a chance, same as budget-exhausted CP paths.
+                    self.waiting.pop_request()
+                    skipped_waiting_requests.prepend_request(request)
+                    continue
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
